@@ -1,5 +1,18 @@
 
 #include "network.h"
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #include <windows.h>
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>  // For close
+   
+#endif
+
+#include <fcntl.h>  // For fcntl
 
 // Initialize client state
 void net_init_client_state(ClientState* state) {
