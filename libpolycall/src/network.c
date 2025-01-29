@@ -248,25 +248,62 @@ void net_remove_client(NetworkProgram* program, int socket_fd) {
     pthread_mutex_unlock(&program->clients_lock);
 }
 
-// Initialize network program
 void net_init_program(NetworkProgram* program) {
     if (!program) return;
     
+    // Initialize base program structure
+    memset(program, 0, sizeof(NetworkProgram));
     pthread_mutex_init(&program->clients_lock, NULL);
     program->running = true;
     
+    // Allocate and initialize endpoints
+    program->endpoints = calloc(1, sizeof(NetworkEndpoint));
+    if (!program->endpoints) {
+        fprintf(stderr, "Failed to allocate endpoints\n");
+        return;
+    }
+    program->count = 1;
+    
+    // Initialize default endpoint
+    NetworkEndpoint* endpoint = &program->endpoints[0];
+    endpoint->port = 8080;  // Default port
+    endpoint->protocol = NET_TCP;
+    endpoint->role = NET_SERVER;
+    strncpy(endpoint->address, "0.0.0.0", INET_ADDRSTRLEN);
+    
+    // Initialize endpoint
+    if (!net_init(endpoint)) {
+        fprintf(stderr, "Failed to initialize endpoint\n");
+        free(program->endpoints);
+        program->endpoints = NULL;
+        program->count = 0;
+        return;
+    }
+    
+    // Initialize client states
     for (int i = 0; i < NET_MAX_CLIENTS; i++) {
         net_init_client_state(&program->clients[i]);
     }
 }
 
-// Clean up network program
+
 void net_cleanup_program(NetworkProgram* program) {
     if (!program) return;
     
     pthread_mutex_lock(&program->clients_lock);
     program->running = false;
     
+    // Clean up endpoints
+    if (program->endpoints) {
+        for (size_t i = 0; i < program->count; i++) {
+            net_close(&program->endpoints[i]);
+        }
+        free(program->endpoints);
+        program->endpoints = NULL;
+    }
+    program->count = 0;
+    
+    // Clean up clients
     for (int i = 0; i < NET_MAX_CLIENTS; i++) {
         net_cleanup_client_state(&program->clients[i]);
     }
@@ -275,9 +312,21 @@ void net_cleanup_program(NetworkProgram* program) {
     pthread_mutex_destroy(&program->clients_lock);
 }
 
-// Update net_run with cross-platform socket handling
 void net_run(NetworkProgram* program) {
-    if (!program || !program->running) return;
+    if (!program) {
+        fprintf(stderr, "DEBUG: net_run called with NULL program\n");
+        return;
+    }
+    
+    if (!program->running) {
+        fprintf(stderr, "DEBUG: Program not running\n");
+        return;
+    }
+    
+    if (!program->endpoints || program->count == 0) {
+        fprintf(stderr, "DEBUG: No endpoints initialized\n");
+        return;
+    }
 
     fd_set readfds;
     struct timeval tv = {
@@ -287,7 +336,15 @@ void net_run(NetworkProgram* program) {
 
     // Setup file descriptors
     FD_ZERO(&readfds);
+    fprintf(stderr, "DEBUG: Setting up file descriptors for socket %d\n", 
+            program->endpoints[0].socket_fd);
+            
     int max_fd = program->endpoints[0].socket_fd;
+    if (max_fd <= 0) {
+        fprintf(stderr, "DEBUG: Invalid socket descriptor\n");
+        return;
+    }
+    
     FD_SET(max_fd, &readfds);
 
     // Add active clients
@@ -296,22 +353,28 @@ void net_run(NetworkProgram* program) {
         pthread_mutex_lock(&program->clients[i].lock);
         if (program->clients[i].is_active) {
             int fd = program->clients[i].socket_fd;
-            FD_SET(fd, &readfds);
-            if (fd > max_fd) max_fd = fd;
+            if (fd > 0) {
+                FD_SET(fd, &readfds);
+                if (fd > max_fd) max_fd = fd;
+            }
         }
         pthread_mutex_unlock(&program->clients[i].lock);
     }
     pthread_mutex_unlock(&program->clients_lock);
 
+    fprintf(stderr, "DEBUG: Calling select with max_fd=%d\n", max_fd);
+    
     // Wait for activity with timeout
     int activity = select(max_fd + 1, &readfds, NULL, NULL, &tv);
     
     if (activity < 0) {
         if (errno != EINTR) {
-            perror("select error");
+            perror("DEBUG: select error");
         }
         return;
     }
+
+    fprintf(stderr, "DEBUG: Select returned %d\n", activity);
 
     // Handle new connections
     if (FD_ISSET(program->endpoints[0].socket_fd, &readfds)) {
