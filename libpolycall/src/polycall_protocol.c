@@ -12,6 +12,15 @@
 // Internal protocol error states
 static char protocol_error_buffer[MAX_ERROR_LENGTH] = {0};
 
+// Internal protocol context structure
+typedef struct {
+    polycall_protocol_context_t base;  // Base context
+    polycall_protocol_callbacks_t callbacks;  // Callback functions
+    char last_error[MAX_ERROR_LENGTH];  // Error buffer
+} protocol_context_internal_t;
+
+// Internal protocol error states
+static char protocol_error_buffer[MAX_ERROR_LENGTH] = {0};
 // Protocol message validation helper
 static bool validate_message_header(const polycall_message_header_t* header) {
     if (!header) return false;
@@ -36,12 +45,12 @@ static bool validate_message_header(const polycall_message_header_t* header) {
 
 // Protocol state transition helper
 static bool transition_protocol_state(
-    polycall_protocol_context_t* ctx,
+    protocol_context_internal_t* ctx,
     polycall_protocol_state_t new_state
 ) {
-    if (!ctx || !ctx->state_machine) return false;
+    if (!ctx || !ctx->base.state_machine) return false;
     
-    polycall_protocol_state_t old_state = ctx->state;
+    polycall_protocol_state_t old_state = ctx->base.state;
     const char* transition_name = NULL;
     
     // Determine appropriate transition
@@ -66,16 +75,16 @@ static bool transition_protocol_state(
     }
     
     // Execute state machine transition
-    if (polycall_sm_execute_transition(ctx->state_machine, transition_name) 
+    if (polycall_sm_execute_transition(ctx->base.state_machine, transition_name) 
         != POLYCALL_SM_SUCCESS) {
         return false;
     }
     
-    ctx->state = new_state;
+    ctx->base.state = new_state;
     
     // Notify state change
-    if (ctx->state != old_state && ctx->callbacks.on_state_change) {
-        ctx->callbacks.on_state_change(ctx, old_state, new_state);
+    if (ctx->base.state != old_state && ctx->callbacks.on_state_change) {
+        ctx->callbacks.on_state_change(&ctx->base, old_state, new_state);
     }
     
     return true;
@@ -93,54 +102,46 @@ bool polycall_protocol_init(
         return false;
     }
     
-    memset(ctx, 0, sizeof(polycall_protocol_context_t));
-    ctx->pc_ctx = pc_ctx;
-    ctx->endpoint = endpoint;
-    ctx->state = POLYCALL_STATE_INIT;
-    ctx->next_sequence = 1;
-    ctx->user_data = config->user_data;
+    protocol_context_internal_t* internal_ctx = calloc(1, sizeof(protocol_context_internal_t));
+    if (!internal_ctx) {
+        snprintf(protocol_error_buffer, MAX_ERROR_LENGTH, "Memory allocation failed");
+        return false;
+    }
+
+    // Initialize base context
+    internal_ctx->base.pc_ctx = pc_ctx;
+    internal_ctx->base.endpoint = endpoint;
+    internal_ctx->base.state = POLYCALL_STATE_INIT;
+    internal_ctx->base.next_sequence = 1;
+    internal_ctx->base.user_data = config->user_data;
     
     // Copy callbacks
-    memcpy(&ctx->callbacks, &config->callbacks, sizeof(polycall_protocol_callbacks_t));
+    memcpy(&internal_ctx->callbacks, &config->callbacks, sizeof(polycall_protocol_callbacks_t));
     
     // Initialize state machine
     polycall_sm_status_t sm_status = polycall_sm_create_with_integrity(
         pc_ctx,
-        &ctx->state_machine,
+        &internal_ctx->base.state_machine,
         NULL  // No integrity check for now
     );
     
     if (sm_status != POLYCALL_SM_SUCCESS) {
         snprintf(protocol_error_buffer, MAX_ERROR_LENGTH,
                 "Failed to create protocol state machine");
+        free(internal_ctx);
         return false;
     }
     
-    // Add protocol states
-    polycall_sm_add_state(ctx->state_machine, "init", NULL, NULL, false);
-    polycall_sm_add_state(ctx->state_machine, "handshake", NULL, NULL, false);
-    polycall_sm_add_state(ctx->state_machine, "auth", NULL, NULL, false);
-    polycall_sm_add_state(ctx->state_machine, "ready", NULL, NULL, false);
-    polycall_sm_add_state(ctx->state_machine, "error", NULL, NULL, false);
-    polycall_sm_add_state(ctx->state_machine, "closed", NULL, NULL, true);
-    
-    // Add transitions
-    polycall_sm_add_transition(ctx->state_machine, POLYCALL_TRANSITION_TO_HANDSHAKE,
-                              0, 1, NULL, NULL);
-    polycall_sm_add_transition(ctx->state_machine, POLYCALL_TRANSITION_TO_AUTH,
-                              1, 2, NULL, NULL);
-    polycall_sm_add_transition(ctx->state_machine, POLYCALL_TRANSITION_TO_READY,
-                              2, 3, NULL, NULL);
-    polycall_sm_add_transition(ctx->state_machine, POLYCALL_TRANSITION_TO_ERROR,
-                              3, 4, NULL, NULL);
-    polycall_sm_add_transition(ctx->state_machine, POLYCALL_TRANSITION_TO_CLOSED,
-                              4, 5, NULL, NULL);
+    // Copy internal context back to provided context
+    memcpy(ctx, &internal_ctx->base, sizeof(polycall_protocol_context_t));
     
     return true;
 }
 
 void polycall_protocol_cleanup(polycall_protocol_context_t* ctx) {
     if (!ctx) return;
+    
+    protocol_context_internal_t* internal_ctx = (protocol_context_internal_t*)ctx;
     
     // Clean up state machine
     if (ctx->state_machine) {
@@ -149,7 +150,7 @@ void polycall_protocol_cleanup(polycall_protocol_context_t* ctx) {
     }
     
     // Clean up context
-    memset(ctx, 0, sizeof(polycall_protocol_context_t));
+    free(internal_ctx);
 }
 
 // Protocol message handling
@@ -178,7 +179,6 @@ bool polycall_protocol_send(
     header.checksum = polycall_protocol_calculate_checksum(payload, payload_length);
     
     // Prepare network packet
-    NetworkPacket packet;
     uint8_t buffer[PROTOCOL_BUFFER_SIZE];
     
     // Copy header and payload to buffer
@@ -192,13 +192,15 @@ bool polycall_protocol_send(
     memcpy(buffer, &header, sizeof(header));
     memcpy(buffer + sizeof(header), payload, payload_length);
     
-    packet.data = buffer;
-    packet.size = total_size;
-    packet.flags = 0;
+    NetworkPacket packet = {
+        .data = buffer,
+        .size = total_size,
+        .flags = 0
+    };
     
-    // Send packet
-    return net_send(ctx->endpoint, &packet) == total_size;
+    return net_send(ctx->endpoint, &packet) == (ssize_t)total_size;
 }
+
 
 bool polycall_protocol_process(
     polycall_protocol_context_t* ctx,
@@ -209,6 +211,7 @@ bool polycall_protocol_process(
         return false;
     }
     
+    protocol_context_internal_t* internal_ctx = (protocol_context_internal_t*)ctx;
     const polycall_message_header_t* header = (const polycall_message_header_t*)data;
     const void* payload = (const uint8_t*)data + sizeof(polycall_message_header_t);
     size_t payload_length = length - sizeof(polycall_message_header_t);
@@ -227,26 +230,26 @@ bool polycall_protocol_process(
     // Process message based on type
     switch (header->type) {
         case POLYCALL_MSG_HANDSHAKE:
-            if (ctx->callbacks.on_handshake) {
-                ctx->callbacks.on_handshake(ctx);
+            if (internal_ctx->callbacks.on_handshake) {
+                internal_ctx->callbacks.on_handshake(&internal_ctx->base);
             }
             break;
             
         case POLYCALL_MSG_AUTH:
-            if (ctx->callbacks.on_auth_request) {
-                ctx->callbacks.on_auth_request(ctx, payload);
+            if (internal_ctx->callbacks.on_auth_request) {
+                internal_ctx->callbacks.on_auth_request(&internal_ctx->base, payload);
             }
             break;
             
         case POLYCALL_MSG_COMMAND:
-            if (ctx->callbacks.on_command) {
-                ctx->callbacks.on_command(ctx, payload, payload_length);
+            if (internal_ctx->callbacks.on_command) {
+                internal_ctx->callbacks.on_command(&internal_ctx->base, payload, payload_length);
             }
             break;
             
         case POLYCALL_MSG_ERROR:
-            if (ctx->callbacks.on_error) {
-                ctx->callbacks.on_error(ctx, payload);
+            if (internal_ctx->callbacks.on_error) {
+                internal_ctx->callbacks.on_error(&internal_ctx->base, payload);
             }
             break;
             
@@ -264,26 +267,25 @@ bool polycall_protocol_process(
 void polycall_protocol_update(polycall_protocol_context_t* ctx) {
     if (!ctx) return;
     
+    protocol_context_internal_t* internal_ctx = (protocol_context_internal_t*)ctx;
+    
     // Process any pending state transitions
     switch (ctx->state) {
         case POLYCALL_STATE_INIT:
-            // Transition to handshake if ready
             if (polycall_protocol_can_transition(ctx, POLYCALL_STATE_HANDSHAKE)) {
                 polycall_protocol_start_handshake(ctx);
             }
             break;
             
         case POLYCALL_STATE_HANDSHAKE:
-            // Check if handshake is complete
             if (polycall_protocol_can_transition(ctx, POLYCALL_STATE_AUTH)) {
-                transition_protocol_state(ctx, POLYCALL_STATE_AUTH);
+                transition_protocol_state(internal_ctx, POLYCALL_STATE_AUTH);
             }
             break;
             
         case POLYCALL_STATE_AUTH:
-            // Check if authentication is complete
             if (polycall_protocol_can_transition(ctx, POLYCALL_STATE_READY)) {
-                transition_protocol_state(ctx, POLYCALL_STATE_READY);
+                transition_protocol_state(internal_ctx, POLYCALL_STATE_READY);
             }
             break;
             
@@ -388,14 +390,11 @@ const char* polycall_protocol_get_error(const polycall_protocol_context_t* ctx) 
     return protocol_error_buffer;
 }
 
-void polycall_protocol_set_error(
-    polycall_protocol_context_t* ctx,
-    const char* error
-) {
+void polycall_protocol_set_error(polycall_protocol_context_t* ctx, const char* error) {
     if (!ctx || !error) return;
-    
-    snprintf(protocol_error_buffer, MAX_ERROR_LENGTH, "%s", error);
-    transition_protocol_state(ctx, POLYCALL_STATE_ERROR);
+    protocol_context_internal_t* internal_ctx = (protocol_context_internal_t*)ctx;
+    snprintf(internal_ctx->last_error, MAX_ERROR_LENGTH, "%s", error);
+    transition_protocol_state(internal_ctx, POLYCALL_STATE_ERROR);
 }
 
 // Protocol utility functions
