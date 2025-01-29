@@ -98,24 +98,34 @@ static bool initialize_runtime(void) {
 
 // Network event handlers
 static void on_network_receive(NetworkEndpoint* endpoint, NetworkPacket* packet) {
-    if (!endpoint || !packet) return;
+    if (!endpoint || !packet || !packet->data) return;
     
-    // Create protocol context if needed
-    polycall_protocol_context_t* proto_ctx = endpoint->user_data;
-    if (!proto_ctx) {
+    polycall_protocol_context_t* proto_ctx = NULL;
+    if (endpoint->user_data) {
+        proto_ctx = (polycall_protocol_context_t*)endpoint->user_data;
+    } else {
+        // Create new protocol context
         polycall_protocol_config_t config = {
             .callbacks = {
                 .on_handshake = on_protocol_handshake,
                 .on_auth_request = on_protocol_auth,
                 .on_command = on_protocol_command,
                 .on_error = on_protocol_error
-            }
+            },
+            .flags = 0,
+            .max_message_size = 4096,
+            .timeout_ms = 5000,
+            .user_data = NULL
         };
         
         proto_ctx = malloc(sizeof(polycall_protocol_context_t));
-        if (!proto_ctx) return;
+        if (!proto_ctx) {
+            fprintf(stderr, "Failed to allocate protocol context\n");
+            return;
+        }
         
         if (!polycall_protocol_init(proto_ctx, g_runtime.pc_ctx, endpoint, &config)) {
+            fprintf(stderr, "Failed to initialize protocol context\n");
             free(proto_ctx);
             return;
         }
@@ -124,50 +134,59 @@ static void on_network_receive(NetworkEndpoint* endpoint, NetworkPacket* packet)
     }
     
     // Process received packet
-    polycall_protocol_process(proto_ctx, packet->data, packet->size);
+    if (!polycall_protocol_process(proto_ctx, packet->data, packet->size)) {
+        fprintf(stderr, "Failed to process protocol message\n");
+    }
 }
 
 static void on_network_connect(NetworkEndpoint* endpoint) {
+    if (!endpoint) return;
     printf("New connection from %s:%d\n", 
            endpoint->address, 
            endpoint->port);
 }
 
 static void on_network_disconnect(NetworkEndpoint* endpoint) {
+    if (!endpoint) return;
+    
     printf("Connection closed from %s:%d\n", 
            endpoint->address, 
            endpoint->port);
            
     if (endpoint->user_data) {
-        polycall_protocol_cleanup(endpoint->user_data);
-        free(endpoint->user_data);
+        polycall_protocol_context_t* proto_ctx = (polycall_protocol_context_t*)endpoint->user_data;
+        polycall_protocol_cleanup(proto_ctx);
+        free(proto_ctx);
         endpoint->user_data = NULL;
     }
 }
 
 // Protocol event handlers
 static void on_protocol_handshake(polycall_protocol_context_t* ctx) {
+    if (!ctx) return;
     printf("Protocol handshake received\n");
     polycall_protocol_complete_handshake(ctx);
 }
 
 static void on_protocol_auth(polycall_protocol_context_t* ctx, const char* credentials) {
+    if (!ctx || !credentials) return;
     printf("Authentication request received\n");
-    // In a real implementation, validate credentials here
     polycall_protocol_authenticate(ctx, credentials, strlen(credentials));
 }
 
 static void on_protocol_command(polycall_protocol_context_t* ctx, const char* command, size_t length) {
+    if (!ctx || !command || length == 0) return;
     printf("Received command: %.*s\n", (int)length, command);
     // Process command based on PPI requirements
 }
 
 static void on_protocol_error(polycall_protocol_context_t* ctx, const char* error) {
+    if (!ctx || !error) return;
     fprintf(stderr, "Protocol error: %s\n", error);
 }
 
 // Main program entry
-int main(int argc, char* argv[]) {
+int main(void) {
     printf("PPI-Focused PolyCall Runtime v%s\n", PPI_VERSION);
     
     if (!initialize_runtime()) {

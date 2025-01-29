@@ -87,6 +87,7 @@ typedef struct {
     int socket_fd;                  // Socket descriptor
     struct sockaddr_in addr;        // Socket address
     PhantomDaemon* phantom;         // Phantom daemon reference
+    void* user_data;               // Added user data field
 } NetworkEndpoint;
 
 // Network Packet
