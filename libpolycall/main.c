@@ -19,7 +19,8 @@ static PolyCall_StateMachine* g_sm = NULL;
 static polycall_context_t g_ctx = NULL;
 static char g_command_history[HISTORY_SIZE][MAX_INPUT];
 static int g_history_count = 0;
-
+static PolyCall_StateSnapshot g_snapshots[POLYCALL_MAX_STATES];
+static bool g_has_snapshot[POLYCALL_MAX_STATES] = {false};
 // State callback implementations
 void on_init(polycall_context_t ctx) {
     printf("State callback: System initialized\n");
@@ -242,7 +243,44 @@ int main(void) {
             } else {
                 printf("State integrity verification failed\n");
             }
-        } else if (strcmp(command, "lock") == 0) {
+        } else if (strcmp(command, "snapshot") == 0) {
+    if (!g_sm) {
+        printf("State machine not initialized\n");
+        continue;
+    }
+    if (!arg1) {
+        printf("Usage: snapshot STATE_ID\n");
+        continue;
+    }
+    unsigned int state_id = atoi(arg1);
+    if (polycall_sm_create_state_snapshot(g_sm, state_id, &g_snapshots[state_id]) == POLYCALL_SM_SUCCESS) {
+        g_has_snapshot[state_id] = true;
+        printf("Created snapshot of state %u\n", state_id);
+    } else {
+        printf("Failed to create snapshot\n");
+    }
+} else if (strcmp(command, "restore") == 0) {
+    if (!g_sm) {
+        printf("State machine not initialized\n");
+        continue;
+    }
+    if (!arg1) {
+        printf("Usage: restore STATE_ID\n");
+        continue;
+    }
+    unsigned int state_id = atoi(arg1);
+    if (!g_has_snapshot[state_id]) {
+        printf("No snapshot exists for state %u\n", state_id);
+        continue;
+    }
+    if (polycall_sm_restore_state_from_snapshot(g_sm, &g_snapshots[state_id]) == POLYCALL_SM_SUCCESS) {
+        printf("Restored state %u from snapshot\n", state_id);
+    } else {
+        printf("Failed to restore from snapshot\n");
+    }
+}
+
+        else if (strcmp(command, "lock") == 0) {
             if (!g_sm) {
                 printf("State machine not initialized\n");
                 continue;
