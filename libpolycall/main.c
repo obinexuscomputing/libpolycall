@@ -16,16 +16,45 @@ typedef struct {
     NetworkProgram* programs[MAX_PROGRAMS];
     size_t program_count;
     polycall_context_t pc_ctx;
+    PolyCall_StateMachine* state_machine;
     bool running;
 } PPI_Runtime;
 
 // Global runtime instance
 static PPI_Runtime g_runtime = {0};
 
-// Forward declarations
-static void handle_signal(int sig);
-static void cleanup_runtime(void);
-static bool initialize_runtime(void);
+// State machine callbacks
+static void on_init_state(polycall_context_t ctx) {
+    DEBUG_PRINT("Entered INIT state");
+}
+
+static void on_ready_state(polycall_context_t ctx) {
+    DEBUG_PRINT("Entered READY state");
+}
+
+static void on_error_state(polycall_context_t ctx) {
+    DEBUG_PRINT("Entered ERROR state");
+    g_runtime.running = false;
+}
+
+// Initialize state machine
+static bool init_state_machine(void) {
+    if (polycall_sm_create_with_integrity(g_runtime.pc_ctx, &g_runtime.state_machine, NULL) 
+        != POLYCALL_SM_SUCCESS) {
+        return false;
+    }
+    
+    // Add states
+    polycall_sm_add_state(g_runtime.state_machine, "INIT", on_init_state, NULL, false);
+    polycall_sm_add_state(g_runtime.state_machine, "READY", on_ready_state, NULL, false);
+    polycall_sm_add_state(g_runtime.state_machine, "ERROR", on_error_state, NULL, true);
+    
+    // Add transitions
+    polycall_sm_add_transition(g_runtime.state_machine, "to_ready", 0, 1, NULL, NULL);
+    polycall_sm_add_transition(g_runtime.state_machine, "to_error", 1, 2, NULL, NULL);
+    
+    return true;
+}
 
 // Signal handler implementation
 static void handle_signal(int sig) {
@@ -46,6 +75,11 @@ static void cleanup_runtime(void) {
         }
     }
     
+    if (g_runtime.state_machine) {
+        polycall_sm_destroy(g_runtime.state_machine);
+        g_runtime.state_machine = NULL;
+    }
+    
     if (g_runtime.pc_ctx) {
         DEBUG_PRINT("Cleaning up PolyCall context");
         polycall_cleanup(g_runtime.pc_ctx);
@@ -59,14 +93,12 @@ static void cleanup_runtime(void) {
 // Initialize PPI runtime
 static bool initialize_runtime(void) {
     DEBUG_PRINT("Initializing runtime");
-
-    // Clear runtime structure
     memset(&g_runtime, 0, sizeof(g_runtime));
     
     // Initialize PolyCall context
     polycall_config_t config = {
         .flags = 0,
-        .memory_pool_size = 1024 * 1024, // 1MB
+        .memory_pool_size = 1024 * 1024,
         .user_data = NULL
     };
     
@@ -76,9 +108,11 @@ static bool initialize_runtime(void) {
         return false;
     }
     
-    // Verify context was created
-    if (!g_runtime.pc_ctx) {
-        fprintf(stderr, "PolyCall context is NULL after initialization\n");
+    // Initialize state machine
+    DEBUG_PRINT("Initializing state machine");
+    if (!init_state_machine()) {
+        fprintf(stderr, "Failed to initialize state machine\n");
+        cleanup_runtime();
         return false;
     }
     
@@ -95,20 +129,28 @@ static bool initialize_runtime(void) {
     DEBUG_PRINT("Initializing network program");
     net_init_program(program);
     
-    // Add program to runtime
-    if (g_runtime.program_count >= MAX_PROGRAMS) {
-        fprintf(stderr, "Maximum number of programs reached\n");
+    // Verify network initialization
+    if (!program->endpoints || program->count == 0) {
+        fprintf(stderr, "Network initialization failed\n");
         free(program);
         cleanup_runtime();
         return false;
     }
     
+    // Add program to runtime
     g_runtime.programs[g_runtime.program_count++] = program;
     
     // Set up signal handlers
     DEBUG_PRINT("Setting up signal handlers");
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+    
+    // Transition to ready state
+    if (polycall_sm_execute_transition(g_runtime.state_machine, "to_ready") != POLYCALL_SM_SUCCESS) {
+        fprintf(stderr, "Failed to transition to ready state\n");
+        cleanup_runtime();
+        return false;
+    }
     
     g_runtime.running = true;
     DEBUG_PRINT("Runtime initialization complete");
@@ -130,8 +172,15 @@ int main(void) {
     DEBUG_PRINT("Entering main loop");
     while (g_runtime.running) {
         for (size_t i = 0; i < g_runtime.program_count; i++) {
-            if (g_runtime.programs[i]) {
-                net_run(g_runtime.programs[i]);
+            NetworkProgram* program = g_runtime.programs[i];
+            if (program && program->endpoints && program->count > 0) {
+                // Verify endpoint is still valid
+                if (program->endpoints[0].socket_fd <= 0) {
+                    DEBUG_PRINT("Invalid socket detected, transitioning to error state");
+                    polycall_sm_execute_transition(g_runtime.state_machine, "to_error");
+                    continue;
+                }
+                net_run(program);
             }
         }
     }

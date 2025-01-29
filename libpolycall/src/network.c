@@ -35,6 +35,14 @@ void net_init_client_state(ClientState* state) {
     memset(&state->addr, 0, sizeof(state->addr));
 }
 
+static uint16_t find_available_port(uint16_t start_port, uint16_t end_port) {
+    for (uint16_t port = start_port; port <= end_port; port++) {
+        if (!net_is_port_in_use(port)) {
+            return port;
+        }
+    }
+    return 0;
+}
 
 // Clean up client state
 void net_cleanup_client_state(ClientState* state) {
@@ -247,7 +255,6 @@ void net_remove_client(NetworkProgram* program, int socket_fd) {
     
     pthread_mutex_unlock(&program->clients_lock);
 }
-
 void net_init_program(NetworkProgram* program) {
     if (!program) return;
     
@@ -256,7 +263,7 @@ void net_init_program(NetworkProgram* program) {
     pthread_mutex_init(&program->clients_lock, NULL);
     program->running = true;
     
-    // Allocate and initialize endpoints
+    // Allocate endpoints
     program->endpoints = calloc(1, sizeof(NetworkEndpoint));
     if (!program->endpoints) {
         fprintf(stderr, "Failed to allocate endpoints\n");
@@ -266,14 +273,27 @@ void net_init_program(NetworkProgram* program) {
     
     // Initialize default endpoint
     NetworkEndpoint* endpoint = &program->endpoints[0];
-    endpoint->port = 8080;  // Default port
+    
+    // Try to find an available port
+    uint16_t port = find_available_port(8080, 8180);
+    if (port == 0) {
+        fprintf(stderr, "No available ports found in range 8080-8180\n");
+        free(program->endpoints);
+        program->endpoints = NULL;
+        program->count = 0;
+        return;
+    }
+    
+    printf("Using port %d\n", port);
+    
+    endpoint->port = port;
     endpoint->protocol = NET_TCP;
     endpoint->role = NET_SERVER;
     strncpy(endpoint->address, "0.0.0.0", INET_ADDRSTRLEN);
     
     // Initialize endpoint
     if (!net_init(endpoint)) {
-        fprintf(stderr, "Failed to initialize endpoint\n");
+        fprintf(stderr, "Failed to initialize endpoint on port %d\n", port);
         free(program->endpoints);
         program->endpoints = NULL;
         program->count = 0;
@@ -284,8 +304,9 @@ void net_init_program(NetworkProgram* program) {
     for (int i = 0; i < NET_MAX_CLIENTS; i++) {
         net_init_client_state(&program->clients[i]);
     }
+    
+    fprintf(stderr, "Network program initialized successfully on port %d\n", port);
 }
-
 
 void net_cleanup_program(NetworkProgram* program) {
     if (!program) return;
