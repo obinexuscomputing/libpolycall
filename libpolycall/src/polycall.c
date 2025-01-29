@@ -29,6 +29,8 @@ polycall_status_t polycall_init_with_config(
     const polycall_config_t* config
 ) {
     if (!ctx) {
+        // Use the error function
+        set_error(NULL, "Invalid context pointer");
         return POLYCALL_ERROR_INVALID_PARAMETERS;
     }
 

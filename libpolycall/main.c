@@ -1,347 +1,192 @@
-// main.c - PolyCall CLI Implementation
+// main.c - PPI-Focused PolyCall Implementation
 #include "polycall.h"
+#include "polycall_protocol.h"
 #include "polycall_state_machine.h"
+#include "network.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
-#define MAX_INPUT 256
-#define HISTORY_SIZE 10
+#define PPI_VERSION "1.0.0"
+#define MAX_ENDPOINTS 16
+#define MAX_PROGRAMS 8
 
-// Context implementation
-struct polycall_context {
-    char last_error[256];
-    void* user_data;
-};
+typedef struct {
+    NetworkProgram* programs[MAX_PROGRAMS];
+    size_t program_count;
+    polycall_context_t pc_ctx;
+    bool running;
+} PPI_Runtime;
 
-// Global state
-static PolyCall_StateMachine* g_sm = NULL;
-static polycall_context_t g_ctx = NULL;
-static char g_command_history[HISTORY_SIZE][MAX_INPUT];
-static int g_history_count = 0;
-static PolyCall_StateSnapshot g_snapshots[POLYCALL_MAX_STATES];
-static bool g_has_snapshot[POLYCALL_MAX_STATES] = {false};
-// State callback implementations
-void on_init(polycall_context_t ctx) {
-    printf("State callback: System initialized\n");
+// Global runtime instance
+static PPI_Runtime g_runtime = {0};
+
+// Forward declarations
+static void handle_signal(int sig);
+static void cleanup_runtime(void);
+static bool initialize_runtime(void);
+static void on_network_receive(NetworkEndpoint* endpoint, NetworkPacket* packet);
+static void on_network_connect(NetworkEndpoint* endpoint);
+static void on_network_disconnect(NetworkEndpoint* endpoint);
+static void on_protocol_handshake(polycall_protocol_context_t* ctx);
+static void on_protocol_auth(polycall_protocol_context_t* ctx, const char* credentials);
+static void on_protocol_command(polycall_protocol_context_t* ctx, const char* command, size_t length);
+static void on_protocol_error(polycall_protocol_context_t* ctx, const char* error);
+
+// Signal handler implementation
+static void handle_signal(int sig) {
+    printf("\nReceived signal %d, shutting down...\n", sig);
+    g_runtime.running = false;
 }
 
-void on_ready(polycall_context_t ctx) {
-    printf("State callback: System ready\n");
-}
-
-void on_running(polycall_context_t ctx) {
-    printf("State callback: System running\n");
-}
-
-void on_paused(polycall_context_t ctx) {
-    printf("State callback: System paused\n");
-}
-
-void on_error(polycall_context_t ctx) {
-    printf("State callback: System error\n");
-}
-
-// Helper functions
-void add_to_history(const char* command) {
-    if (g_history_count < HISTORY_SIZE) {
-        strncpy(g_command_history[g_history_count++], command, MAX_INPUT - 1);
-    } else {
-        memmove(g_command_history[0], g_command_history[1], (HISTORY_SIZE - 1) * MAX_INPUT);
-        strncpy(g_command_history[HISTORY_SIZE - 1], command, MAX_INPUT - 1);
-    }
-}
-
-void print_help(void) {
-    printf("\nPolyCall CLI Commands:\n");
-    printf("  init                    - Initialize the state machine\n");
-    printf("  add_state NAME         - Add a new state\n");
-    printf("  add_transition NAME FROM TO - Add a transition between states\n");
-    printf("  execute NAME           - Execute a transition\n");
-    printf("  lock STATE_ID          - Lock a state\n");
-    printf("  unlock STATE_ID        - Unlock a state\n");
-    printf("  verify STATE_ID        - Verify state integrity\n");
-    printf("  snapshot STATE_ID      - Create state snapshot\n");
-    printf("  restore STATE_ID       - Restore from snapshot\n");
-    printf("  diagnostics STATE_ID   - Get state diagnostics\n");
-    printf("  list_states            - List all states\n");
-    printf("  list_transitions       - List all transitions\n");
-    printf("  history                - Show command history\n");
-    printf("  help                   - Show this help message\n");
-    printf("  quit                   - Exit the program\n");
-}
-
-void list_states(void) {
-    if (!g_sm) {
-        printf("State machine not initialized\n");
-        return;
-    }
-
-    printf("\nStates:\n");
-    for (unsigned int i = 0; i < g_sm->num_states; i++) {
-        printf("  %u: %s (locked: %s)\n", 
-               i, 
-               g_sm->states[i].name, 
-               g_sm->states[i].is_locked ? "yes" : "no");
-    }
-}
-
-void list_transitions(void) {
-    if (!g_sm) {
-        printf("State machine not initialized\n");
-        return;
-    }
-
-    printf("\nTransitions:\n");
-    for (unsigned int i = 0; i < g_sm->num_transitions; i++) {
-        printf("  %s: %u -> %u\n", 
-               g_sm->transitions[i].name,
-               g_sm->transitions[i].from_state,
-               g_sm->transitions[i].to_state);
-    }
-}
-
-void show_history(void) {
-    printf("\nCommand History:\n");
-    for (int i = 0; i < g_history_count; i++) {
-        printf("  %d: %s\n", i + 1, g_command_history[i]);
-    }
-}
-
-int initialize_state_machine(void) {
-    polycall_config_t config = {0};
-    
-    if (polycall_init_with_config(&g_ctx, &config) != POLYCALL_SUCCESS) {
-        printf("Failed to initialize PolyCall context\n");
-        return 0;
-    }
-
-    if (polycall_sm_create_with_integrity(g_ctx, &g_sm, NULL) != POLYCALL_SM_SUCCESS) {
-        printf("Failed to create state machine\n");
-        polycall_cleanup(g_ctx);
-        return 0;
-    }
-
-    // Add default states
-    polycall_sm_add_state(g_sm, "INIT", on_init, NULL, false);
-    polycall_sm_add_state(g_sm, "READY", on_ready, NULL, false);
-    polycall_sm_add_state(g_sm, "RUNNING", on_running, NULL, false);
-    polycall_sm_add_state(g_sm, "PAUSED", on_paused, NULL, false);
-    polycall_sm_add_state(g_sm, "ERROR", on_error, NULL, true);
-
-    printf("State machine initialized with default states\n");
-    return 1;
-}
-
-void cleanup(void) {
-    if (g_sm) {
-        polycall_sm_destroy(g_sm);
-        g_sm = NULL;
-    }
-    if (g_ctx) {
-        polycall_cleanup(g_ctx);
-        g_ctx = NULL;
-    }
-}
-
-int main(void) {
-    char input[MAX_INPUT];
-    char *command, *arg1, *arg2, *arg3;
-    
-    printf("PolyCall CLI - Type 'help' for commands\n");
-
-    while (1) {
-        printf("\n> ");
-        if (!fgets(input, sizeof(input), stdin)) {
-            break;
+// Runtime cleanup
+static void cleanup_runtime(void) {
+    for (size_t i = 0; i < g_runtime.program_count; i++) {
+        if (g_runtime.programs[i]) {
+            net_cleanup_program(g_runtime.programs[i]);
+            free(g_runtime.programs[i]);
         }
+    }
+    
+    if (g_runtime.pc_ctx) {
+        polycall_cleanup(g_runtime.pc_ctx);
+    }
+    
+    memset(&g_runtime, 0, sizeof(g_runtime));
+}
 
-        // Remove newline
-        input[strcspn(input, "\n")] = 0;
+// Initialize PPI runtime
+static bool initialize_runtime(void) {
+    // Initialize PolyCall context
+    polycall_config_t config = {
+        .flags = 0,
+        .memory_pool_size = 1024 * 1024, // 1MB
+        .user_data = NULL
+    };
+    
+    if (polycall_init_with_config(&g_runtime.pc_ctx, &config) != POLYCALL_SUCCESS) {
+        fprintf(stderr, "Failed to initialize PolyCall context\n");
+        return false;
+    }
+    
+    // Create default network program
+    NetworkProgram* program = calloc(1, sizeof(NetworkProgram));
+    if (!program) {
+        fprintf(stderr, "Failed to allocate network program\n");
+        return false;
+    }
+    
+    // Initialize network program
+    net_init_program(program);
+    
+    // Set up network handlers
+    program->handlers.on_receive = on_network_receive;
+    program->handlers.on_connect = on_network_connect;
+    program->handlers.on_disconnect = on_network_disconnect;
+    
+    // Add program to runtime
+    g_runtime.programs[g_runtime.program_count++] = program;
+    
+    // Set up signal handlers
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+    
+    g_runtime.running = true;
+    return true;
+}
+
+// Network event handlers
+static void on_network_receive(NetworkEndpoint* endpoint, NetworkPacket* packet) {
+    if (!endpoint || !packet) return;
+    
+    // Create protocol context if needed
+    polycall_protocol_context_t* proto_ctx = endpoint->user_data;
+    if (!proto_ctx) {
+        polycall_protocol_config_t config = {
+            .callbacks = {
+                .on_handshake = on_protocol_handshake,
+                .on_auth_request = on_protocol_auth,
+                .on_command = on_protocol_command,
+                .on_error = on_protocol_error
+            }
+        };
         
-        // Skip empty lines
-        if (strlen(input) == 0) {
-            continue;
+        proto_ctx = malloc(sizeof(polycall_protocol_context_t));
+        if (!proto_ctx) return;
+        
+        if (!polycall_protocol_init(proto_ctx, g_runtime.pc_ctx, endpoint, &config)) {
+            free(proto_ctx);
+            return;
         }
+        
+        endpoint->user_data = proto_ctx;
+    }
+    
+    // Process received packet
+    polycall_protocol_process(proto_ctx, packet->data, packet->size);
+}
 
-        add_to_history(input);
+static void on_network_connect(NetworkEndpoint* endpoint) {
+    printf("New connection from %s:%d\n", 
+           endpoint->address, 
+           endpoint->port);
+}
 
-        // Parse command and arguments
-        command = strtok(input, " ");
-        arg1 = strtok(NULL, " ");
-        arg2 = strtok(NULL, " ");
-        arg3 = strtok(NULL, " ");
-
-        if (!command) continue;
-
-        if (strcmp(command, "quit") == 0) {
-            break;
-        } else if (strcmp(command, "help") == 0) {
-            print_help();
-        } else if (strcmp(command, "init") == 0) {
-            if (g_sm) {
-                printf("State machine already initialized\n");
-            } else {
-                initialize_state_machine();
-            }
-        } else if (strcmp(command, "add_state") == 0) {
-            if (!g_sm) {
-                printf("State machine not initialized\n");
-                continue;
-            }
-            if (!arg1) {
-                printf("Usage: add_state NAME\n");
-                continue;
-            }
-            if (polycall_sm_add_state(g_sm, arg1, NULL, NULL, false) == POLYCALL_SM_SUCCESS) {
-                printf("State '%s' added successfully\n", arg1);
-            } else {
-                printf("Failed to add state\n");
-            }
-        } else if (strcmp(command, "add_transition") == 0) {
-            if (!g_sm) {
-                printf("State machine not initialized\n");
-                continue;
-            }
-            if (!arg1 || !arg2 || !arg3) {
-                printf("Usage: add_transition NAME FROM_STATE TO_STATE\n");
-                continue;
-            }
-            unsigned int from = atoi(arg2);
-            unsigned int to = atoi(arg3);
-            if (polycall_sm_add_transition(g_sm, arg1, from, to, NULL, NULL) == POLYCALL_SM_SUCCESS) {
-                printf("Transition '%s' added successfully\n", arg1);
-            } else {
-                printf("Failed to add transition\n");
-            }
-        } else if (strcmp(command, "execute") == 0) {
-            if (!g_sm) {
-                printf("State machine not initialized\n");
-                continue;
-            }
-            if (!arg1) {
-                printf("Usage: execute TRANSITION_NAME\n");
-                continue;
-            }
-            if (polycall_sm_execute_transition(g_sm, arg1) == POLYCALL_SM_SUCCESS) {
-                printf("Transition '%s' executed successfully\n", arg1);
-            } else {
-                printf("Failed to execute transition\n");
-            }
-        } else if (strcmp(command, "verify") == 0) {
-            if (!g_sm) {
-                printf("State machine not initialized\n");
-                continue;
-            }
-            if (!arg1) {
-                printf("Usage: verify STATE_ID\n");
-                continue;
-            }
-            unsigned int state_id = atoi(arg1);
-            if (polycall_sm_verify_state_integrity(g_sm, state_id) == POLYCALL_SM_SUCCESS) {
-                printf("State %u integrity verified\n", state_id);
-            } else {
-                printf("State integrity verification failed\n");
-            }
-        } else if (strcmp(command, "snapshot") == 0) {
-    if (!g_sm) {
-        printf("State machine not initialized\n");
-        continue;
-    }
-    if (!arg1) {
-        printf("Usage: snapshot STATE_ID\n");
-        continue;
-    }
-    unsigned int state_id = atoi(arg1);
-    if (polycall_sm_create_state_snapshot(g_sm, state_id, &g_snapshots[state_id]) == POLYCALL_SM_SUCCESS) {
-        g_has_snapshot[state_id] = true;
-        printf("Created snapshot of state %u\n", state_id);
-    } else {
-        printf("Failed to create snapshot\n");
-    }
-} else if (strcmp(command, "restore") == 0) {
-    if (!g_sm) {
-        printf("State machine not initialized\n");
-        continue;
-    }
-    if (!arg1) {
-        printf("Usage: restore STATE_ID\n");
-        continue;
-    }
-    unsigned int state_id = atoi(arg1);
-    if (!g_has_snapshot[state_id]) {
-        printf("No snapshot exists for state %u\n", state_id);
-        continue;
-    }
-    if (polycall_sm_restore_state_from_snapshot(g_sm, &g_snapshots[state_id]) == POLYCALL_SM_SUCCESS) {
-        printf("Restored state %u from snapshot\n", state_id);
-    } else {
-        printf("Failed to restore from snapshot\n");
+static void on_network_disconnect(NetworkEndpoint* endpoint) {
+    printf("Connection closed from %s:%d\n", 
+           endpoint->address, 
+           endpoint->port);
+           
+    if (endpoint->user_data) {
+        polycall_protocol_cleanup(endpoint->user_data);
+        free(endpoint->user_data);
+        endpoint->user_data = NULL;
     }
 }
 
-        else if (strcmp(command, "lock") == 0) {
-            if (!g_sm) {
-                printf("State machine not initialized\n");
-                continue;
+// Protocol event handlers
+static void on_protocol_handshake(polycall_protocol_context_t* ctx) {
+    printf("Protocol handshake received\n");
+    polycall_protocol_complete_handshake(ctx);
+}
+
+static void on_protocol_auth(polycall_protocol_context_t* ctx, const char* credentials) {
+    printf("Authentication request received\n");
+    // In a real implementation, validate credentials here
+    polycall_protocol_authenticate(ctx, credentials, strlen(credentials));
+}
+
+static void on_protocol_command(polycall_protocol_context_t* ctx, const char* command, size_t length) {
+    printf("Received command: %.*s\n", (int)length, command);
+    // Process command based on PPI requirements
+}
+
+static void on_protocol_error(polycall_protocol_context_t* ctx, const char* error) {
+    fprintf(stderr, "Protocol error: %s\n", error);
+}
+
+// Main program entry
+int main(int argc, char* argv[]) {
+    printf("PPI-Focused PolyCall Runtime v%s\n", PPI_VERSION);
+    
+    if (!initialize_runtime()) {
+        fprintf(stderr, "Failed to initialize runtime\n");
+        return 1;
+    }
+    
+    printf("Runtime initialized. Press Ctrl+C to exit.\n");
+    
+    // Main event loop
+    while (g_runtime.running) {
+        for (size_t i = 0; i < g_runtime.program_count; i++) {
+            if (g_runtime.programs[i]) {
+                net_run(g_runtime.programs[i]);
             }
-            if (!arg1) {
-                printf("Usage: lock STATE_ID\n");
-                continue;
-            }
-            unsigned int state_id = atoi(arg1);
-            if (polycall_sm_lock_state(g_sm, state_id) == POLYCALL_SM_SUCCESS) {
-                printf("State %u locked\n", state_id);
-            } else {
-                printf("Failed to lock state\n");
-            }
-        } else if (strcmp(command, "unlock") == 0) {
-            if (!g_sm) {
-                printf("State machine not initialized\n");
-                continue;
-            }
-            if (!arg1) {
-                printf("Usage: unlock STATE_ID\n");
-                continue;
-            }
-            unsigned int state_id = atoi(arg1);
-            if (polycall_sm_unlock_state(g_sm, state_id) == POLYCALL_SM_SUCCESS) {
-                printf("State %u unlocked\n", state_id);
-            } else {
-                printf("Failed to unlock state\n");
-            }
-        } else if (strcmp(command, "diagnostics") == 0) {
-            if (!g_sm) {
-                printf("State machine not initialized\n");
-                continue;
-            }
-            if (!arg1) {
-                printf("Usage: diagnostics STATE_ID\n");
-                continue;
-            }
-            unsigned int state_id = atoi(arg1);
-            PolyCall_StateDiagnostics diag;
-            if (polycall_sm_get_state_diagnostics(g_sm, state_id, &diag) == POLYCALL_SM_SUCCESS) {
-                printf("State %u diagnostics:\n", state_id);
-                printf("  Creation time: %lu\n", diag.creation_time);
-                printf("  Last modified: %lu\n", diag.last_modified);
-                printf("  Is locked: %s\n", diag.is_locked ? "yes" : "no");
-                printf("  Checksum: %u\n", diag.current_checksum);
-            } else {
-                printf("Failed to get state diagnostics\n");
-            }
-        } else if (strcmp(command, "list_states") == 0) {
-            list_states();
-        } else if (strcmp(command, "list_transitions") == 0) {
-            list_transitions();
-        } else if (strcmp(command, "history") == 0) {
-            show_history();
-        } else {
-            printf("Unknown command. Type 'help' for available commands\n");
         }
     }
-
-    cleanup();
-    printf("Goodbye!\n");
+    
+    cleanup_runtime();
+    printf("Runtime shutdown complete.\n");
     return 0;
 }
