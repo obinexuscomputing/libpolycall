@@ -7,6 +7,11 @@
 #include <string.h>
 #include <signal.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 #define PPI_VERSION "1.0.0"
 #define MAX_ENDPOINTS 16
 #define MAX_PROGRAMS 8
@@ -18,6 +23,9 @@ typedef struct {
     polycall_context_t pc_ctx;
     PolyCall_StateMachine* state_machine;
     bool running;
+#ifdef _WIN32
+    bool wsaInitialized;
+#endif
 } PPI_Runtime;
 
 // Global runtime instance
@@ -25,14 +33,17 @@ static PPI_Runtime g_runtime = {0};
 
 // State machine callbacks
 static void on_init_state(polycall_context_t ctx) {
+    (void)ctx; // Mark parameter as intentionally unused
     DEBUG_PRINT("Entered INIT state");
 }
 
 static void on_ready_state(polycall_context_t ctx) {
+    (void)ctx; // Mark parameter as intentionally unused
     DEBUG_PRINT("Entered READY state");
 }
 
 static void on_error_state(polycall_context_t ctx) {
+    (void)ctx; // Mark parameter as intentionally unused
     DEBUG_PRINT("Entered ERROR state");
     g_runtime.running = false;
 }
@@ -86,6 +97,13 @@ static void cleanup_runtime(void) {
         g_runtime.pc_ctx = NULL;
     }
     
+#ifdef _WIN32
+    if (g_runtime.wsaInitialized) {
+        WSACleanup();
+        g_runtime.wsaInitialized = false;
+    }
+#endif
+    
     g_runtime.program_count = 0;
     g_runtime.running = false;
 }
@@ -94,6 +112,17 @@ static void cleanup_runtime(void) {
 static bool initialize_runtime(void) {
     DEBUG_PRINT("Initializing runtime");
     memset(&g_runtime, 0, sizeof(g_runtime));
+    
+#ifdef _WIN32
+    // Initialize Windows Sockets
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        fprintf(stderr, "Failed to initialize Winsock\n");
+        return false;
+    }
+    g_runtime.wsaInitialized = true;
+    DEBUG_PRINT("Windows Sockets initialized");
+#endif
     
     // Initialize PolyCall context
     polycall_config_t config = {
@@ -157,7 +186,6 @@ static bool initialize_runtime(void) {
     return true;
 }
 
-// Main program entry
 int main(void) {
     printf("PPI-Focused PolyCall Runtime v%s\n", PPI_VERSION);
     
