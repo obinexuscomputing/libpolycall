@@ -1,18 +1,31 @@
-
 #include "network.h"
+
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #include <windows.h>
+    #define SHUT_RDWR SD_BOTH
+    typedef char* sock_opt_type;
 #else
     #include <sys/socket.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
-    #include <unistd.h>  // For close
-   
+    #include <fcntl.h>
+    #include <unistd.h>
+    typedef void* sock_opt_type;
 #endif
 
-#include <fcntl.h>  // For fcntl
+// Set socket non-blocking mode
+static int set_nonblocking(int sockfd) {
+#ifdef _WIN32
+    u_long mode = 1;  // 1 for non-blocking, 0 for blocking
+    return ioctlsocket(sockfd, FIONBIO, &mode);
+#else
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    return fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
 
 // Initialize client state
 void net_init_client_state(ClientState* state) {
@@ -21,6 +34,7 @@ void net_init_client_state(ClientState* state) {
     state->socket_fd = 0;
     memset(&state->addr, 0, sizeof(state->addr));
 }
+
 
 // Clean up client state
 void net_cleanup_client_state(ClientState* state) {
@@ -63,7 +77,10 @@ bool net_release_port(uint16_t port) {
     
     // Set SO_REUSEADDR
     int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (sock_opt_type)&opt, sizeof(opt)) < 0) {
+        close(sock);
+        return false;
+    }
     
     // Attempt to bind and immediately close
     int result = bind(sock, (struct sockaddr*)&addr, sizeof(addr));
@@ -75,7 +92,7 @@ bool net_release_port(uint16_t port) {
     return result >= 0;
 }
 
-// Update net_init to include port checking and cleanup
+// Update net_init for cross-platform compatibility
 bool net_init(NetworkEndpoint* endpoint) {
     if (!endpoint) return false;
     
@@ -84,12 +101,6 @@ bool net_init(NetworkEndpoint* endpoint) {
         printf("Port %d is in use, attempting to release...\n", endpoint->port);
         if (!net_release_port(endpoint->port)) {
             printf("Failed to release port %d\n", endpoint->port);
-            printf("Please try:\n");
-            printf("1. Wait a few seconds and try again\n");
-            printf("2. Use a different port with -p option\n");
-            printf("3. Or manually kill the process using the port:\n");
-            printf("   sudo lsof -i :%d\n", endpoint->port);
-            printf("   sudo kill <PID>\n");
             return false;
         }
         printf("Successfully released port %d\n", endpoint->port);
@@ -112,7 +123,8 @@ bool net_init(NetworkEndpoint* endpoint) {
 
     // Set socket options
     int opt = 1;
-    if (setsockopt(endpoint->socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    if (setsockopt(endpoint->socket_fd, SOL_SOCKET, SO_REUSEADDR, 
+                   (sock_opt_type)&opt, sizeof(opt)) < 0) {
         perror("setsockopt failed");
         close(endpoint->socket_fd);
         pthread_mutex_unlock(&endpoint->lock);
@@ -127,7 +139,8 @@ bool net_init(NetworkEndpoint* endpoint) {
     
     // For server endpoints
     if (endpoint->role == NET_SERVER) {
-        if (bind(endpoint->socket_fd, (struct sockaddr*)&endpoint->addr, sizeof(endpoint->addr)) < 0) {
+        if (bind(endpoint->socket_fd, (struct sockaddr*)&endpoint->addr, 
+                sizeof(endpoint->addr)) < 0) {
             perror("Bind failed");
             close(endpoint->socket_fd);
             pthread_mutex_unlock(&endpoint->lock);
@@ -149,8 +162,7 @@ bool net_init(NetworkEndpoint* endpoint) {
     pthread_mutex_unlock(&endpoint->lock);
     return true;
 }
-
-// Update net_close to ensure complete cleanup
+// Update net_close with platform-specific handling
 void net_close(NetworkEndpoint* endpoint) {
     if (!endpoint) return;
     
@@ -159,7 +171,8 @@ void net_close(NetworkEndpoint* endpoint) {
     if (endpoint->socket_fd > 0) {
         // Set linger to ensure complete socket shutdown
         struct linger ling = {1, 0};  // Immediate shutdown
-        setsockopt(endpoint->socket_fd, SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
+        setsockopt(endpoint->socket_fd, SOL_SOCKET, SO_LINGER, 
+                  (sock_opt_type)&ling, sizeof(ling));
         
         shutdown(endpoint->socket_fd, SHUT_RDWR);  // Shutdown both directions
         close(endpoint->socket_fd);
@@ -262,7 +275,7 @@ void net_cleanup_program(NetworkProgram* program) {
     pthread_mutex_destroy(&program->clients_lock);
 }
 
-// Run network program
+// Update net_run with cross-platform socket handling
 void net_run(NetworkProgram* program) {
     if (!program || !program->running) return;
 
@@ -311,9 +324,9 @@ void net_run(NetworkProgram* program) {
 
         if (new_socket >= 0) {
             // Set socket to non-blocking mode
-            int flags = fcntl(new_socket, F_GETFL, 0);
-            if (flags >= 0) {
-                fcntl(new_socket, F_SETFL, flags | O_NONBLOCK);
+            if (set_nonblocking(new_socket) < 0) {
+                close(new_socket);
+                return;
             }
 
             // Add client
@@ -333,6 +346,7 @@ void net_run(NetworkProgram* program) {
         }
     }
 
+    // Rest of the function remains unchanged...
     // Handle client data
     pthread_mutex_lock(&program->clients_lock);
     for (int i = 0; i < NET_MAX_CLIENTS; i++) {
