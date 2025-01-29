@@ -20,7 +20,6 @@ typedef struct {
 } protocol_context_internal_t;
 
 // Internal protocol error states
-static char protocol_error_buffer[MAX_ERROR_LENGTH] = {0};
 // Protocol message validation helper
 static bool validate_message_header(const polycall_message_header_t* header) {
     if (!header) return false;
@@ -294,27 +293,22 @@ void polycall_protocol_update(polycall_protocol_context_t* ctx) {
     }
 }
 
-// Protocol state management
+
+// Get current protocol state
 polycall_protocol_state_t polycall_protocol_get_state(
     const polycall_protocol_context_t* ctx
 ) {
     return ctx ? ctx->state : POLYCALL_STATE_ERROR;
 }
 
+// Protocol state transition validation
 bool polycall_protocol_can_transition(
     const polycall_protocol_context_t* ctx,
     polycall_protocol_state_t target_state
 ) {
     if (!ctx || !ctx->state_machine) return false;
     
-    // Get current state version
-    unsigned int version;
-    if (polycall_sm_get_state_version(ctx->state_machine, ctx->state, &version)
-        != POLYCALL_SM_SUCCESS) {
-        return false;
-    }
-    
-    // Check if target state is valid
+    // Check if target state is valid based on current state
     switch (ctx->state) {
         case POLYCALL_STATE_INIT:
             return target_state == POLYCALL_STATE_HANDSHAKE;
@@ -337,9 +331,10 @@ bool polycall_protocol_can_transition(
     }
 }
 
-// Protocol handshake implementation
 bool polycall_protocol_start_handshake(polycall_protocol_context_t* ctx) {
     if (!ctx || ctx->state != POLYCALL_STATE_INIT) return false;
+    
+    protocol_context_internal_t* internal_ctx = (protocol_context_internal_t*)ctx;
     
     // Create handshake payload
     struct {
@@ -359,21 +354,23 @@ bool polycall_protocol_start_handshake(polycall_protocol_context_t* ctx) {
         return false;
     }
     
-    return transition_protocol_state(ctx, POLYCALL_STATE_HANDSHAKE);
+    return transition_protocol_state(internal_ctx, POLYCALL_STATE_HANDSHAKE);
 }
 
 bool polycall_protocol_complete_handshake(polycall_protocol_context_t* ctx) {
     if (!ctx || ctx->state != POLYCALL_STATE_HANDSHAKE) return false;
-    return transition_protocol_state(ctx, POLYCALL_STATE_AUTH);
+    protocol_context_internal_t* internal_ctx = (protocol_context_internal_t*)ctx;
+    return transition_protocol_state(internal_ctx, POLYCALL_STATE_AUTH);
 }
 
-// Protocol authentication implementation
 bool polycall_protocol_authenticate(
     polycall_protocol_context_t* ctx,
     const char* credentials,
     size_t credentials_length
 ) {
     if (!ctx || !credentials || credentials_length == 0) return false;
+    
+    protocol_context_internal_t* internal_ctx = (protocol_context_internal_t*)ctx;
     
     // Send authentication message
     if (!polycall_protocol_send(ctx, POLYCALL_MSG_AUTH,
@@ -382,13 +379,11 @@ bool polycall_protocol_authenticate(
         return false;
     }
     
-    return true;
+    return transition_protocol_state(internal_ctx, POLYCALL_STATE_READY);
 }
 
-// Protocol error handling
-const char* polycall_protocol_get_error(const polycall_protocol_context_t* ctx) {
-    return protocol_error_buffer;
-}
+
+
 
 void polycall_protocol_set_error(polycall_protocol_context_t* ctx, const char* error) {
     if (!ctx || !error) return;
@@ -425,11 +420,14 @@ bool polycall_protocol_verify_checksum(
     return calculated == header->checksum;
 }
 
+
+
+// Protocol version compatibility check
 bool polycall_protocol_version_compatible(uint8_t remote_version) {
-    // For now, only exact version match is supported
     return remote_version == POLYCALL_PROTOCOL_VERSION;
 }
 
+// Create protocol message header
 polycall_message_header_t polycall_protocol_create_header(
     polycall_message_type_t type,
     size_t payload_length,
@@ -461,6 +459,6 @@ bool polycall_protocol_is_authenticated(const polycall_protocol_context_t* ctx) 
 }
 
 bool polycall_protocol_is_error(const polycall_protocol_context_t* ctx) {
-    if (!ctx) return true;  // No context is considered an error state
+    if (!ctx) return true;
     return ctx->state == POLYCALL_STATE_ERROR;
 }
