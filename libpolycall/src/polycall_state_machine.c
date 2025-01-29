@@ -20,23 +20,8 @@ static inline void update_state_timestamp(PolyCall_State* state) {
     state->timestamp = (uint64_t)time(NULL);
     state->version++;
 }
-/* Static helper functions */
-static inline uint32_t calculate_state_checksum(const PolyCall_State* state) {
-    uint32_t checksum = 0;
-    const uint8_t* data = (const uint8_t*)state;
-    size_t size = offsetof(PolyCall_State, checksum);
-    
-    for (size_t i = 0; i < size; i++) {
-        checksum = (checksum << 8) | (checksum >> 24);
-        checksum += data[i];
-    }
-    return checksum;
-}
 
-static inline void update_state_timestamp(PolyCall_State* state) {
-    state->timestamp = (uint64_t)time(NULL);
-    state->version++;
-}
+
 
 /* Core state machine functions */
 
