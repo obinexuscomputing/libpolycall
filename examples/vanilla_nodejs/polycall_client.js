@@ -1,9 +1,11 @@
-// root/example/noderaw_example/polycall_client.js
 const net = require('net');
 const EventEmitter = require('events');
 
 // Protocol constants
 const PROTOCOL_VERSION = 1;
+const PROTOCOL_MAGIC = 0x504C43; // "PLC"
+const HEADER_SIZE = 16;
+
 const MESSAGE_TYPES = {
     HANDSHAKE: 0x01,
     AUTH: 0x02,
@@ -13,22 +15,54 @@ const MESSAGE_TYPES = {
     HEARTBEAT: 0x06
 };
 
+const PROTOCOL_FLAGS = {
+    NONE: 0x00,
+    ENCRYPTED: 0x01,
+    COMPRESSED: 0x02,
+    URGENT: 0x04,
+    RELIABLE: 0x08
+};
+
 class PolyCallClient extends EventEmitter {
-    constructor() {
+    constructor(options = {}) {
         super();
+        this.options = {
+            reconnect: true,
+            heartbeatInterval: 5000,
+            responseTimeout: 5000,
+            maxRetries: 3,
+            ...options
+        };
+
         this.socket = null;
         this.connected = false;
+        this.authenticated = false;
         this.sequence = 1;
+        this.pendingResponses = new Map();
+        this.heartbeatTimer = null;
+        this.reconnectAttempts = 0;
+        this.messageQueue = [];
     }
 
     // Connect to PolyCall server
     connect(port = 8080, host = 'localhost') {
+        this.port = port;
+        this.host = host;
+        this.establishConnection();
+    }
+
+    // Establish socket connection
+    establishConnection() {
         this.socket = new net.Socket();
 
         this.socket.on('connect', () => {
             console.log('Connected to PolyCall server');
             this.connected = true;
+            this.reconnectAttempts = 0;
+            this.emit('connected');
+            this.startHeartbeat();
             this.sendHandshake();
+            this.processQueuedMessages();
         });
 
         this.socket.on('data', (data) => {
@@ -36,9 +70,7 @@ class PolyCallClient extends EventEmitter {
         });
 
         this.socket.on('close', () => {
-            console.log('Connection closed');
-            this.connected = false;
-            this.emit('disconnected');
+            this.handleDisconnect();
         });
 
         this.socket.on('error', (err) => {
@@ -46,22 +78,22 @@ class PolyCallClient extends EventEmitter {
             this.emit('error', err);
         });
 
-        this.socket.connect(port, host);
+        this.socket.connect(this.port, this.host);
     }
 
     // Create message header
-    createHeader(type, payloadLength) {
-        const header = Buffer.alloc(16); // 16 byte header
+    createHeader(type, payloadLength, flags = PROTOCOL_FLAGS.NONE) {
+        const header = Buffer.alloc(HEADER_SIZE);
         header.writeUInt8(PROTOCOL_VERSION, 0); // Version
         header.writeUInt8(type, 1); // Message type
-        header.writeUInt16LE(0, 2); // Flags
+        header.writeUInt16LE(flags, 2); // Flags
         header.writeUInt32LE(this.sequence++, 4); // Sequence number
         header.writeUInt32LE(payloadLength, 8); // Payload length
-        header.writeUInt32LE(0, 12); // Checksum (placeholder)
+        header.writeUInt32LE(0, 12); // Checksum placeholder
         return header;
     }
 
-    // Calculate checksum
+    // Calculate message checksum
     calculateChecksum(data) {
         let checksum = 0;
         for (let i = 0; i < data.length; i++) {
@@ -73,39 +105,59 @@ class PolyCallClient extends EventEmitter {
     // Send handshake message
     sendHandshake() {
         const payload = Buffer.alloc(8);
-        payload.writeUInt32LE(0x504C43, 0); // Magic number "PLC"
+        payload.writeUInt32LE(PROTOCOL_MAGIC, 0);
         payload.writeUInt32LE(0, 4); // Reserved
 
-        const header = this.createHeader(MESSAGE_TYPES.HANDSHAKE, payload.length);
-        const message = Buffer.concat([header, payload]);
+        const header = this.createHeader(
+            MESSAGE_TYPES.HANDSHAKE,
+            payload.length,
+            PROTOCOL_FLAGS.RELIABLE
+        );
         
-        // Calculate and set checksum
-        const checksum = this.calculateChecksum(payload);
-        message.writeUInt32LE(checksum, 12);
-
-        this.socket.write(message);
+        this.sendMessage(header, payload);
     }
 
-    // Send command to server
-    sendCommand(command) {
+    // Send authenticated command
+    async sendCommand(command, timeout = this.options.responseTimeout) {
         if (!this.connected) {
+            if (this.options.reconnect) {
+                this.messageQueue.push({ command, timeout });
+                this.establishConnection();
+                return;
+            }
             throw new Error('Not connected to server');
         }
 
         const payload = Buffer.from(command);
-        const header = this.createHeader(MESSAGE_TYPES.COMMAND, payload.length);
-        const message = Buffer.concat([header, payload]);
-        
-        // Calculate and set checksum
-        const checksum = this.calculateChecksum(payload);
-        message.writeUInt32LE(checksum, 12);
+        const header = this.createHeader(
+            MESSAGE_TYPES.COMMAND,
+            payload.length,
+            PROTOCOL_FLAGS.RELIABLE
+        );
 
+        return new Promise((resolve, reject) => {
+            const sequence = header.readUInt32LE(4);
+            const timer = setTimeout(() => {
+                this.pendingResponses.delete(sequence);
+                reject(new Error('Command timeout'));
+            }, timeout);
+
+            this.pendingResponses.set(sequence, { resolve, reject, timer });
+            this.sendMessage(header, payload);
+        });
+    }
+
+    // Send protocol message
+    sendMessage(header, payload) {
+        const message = Buffer.concat([header, payload]);
+        const checksum = this.calculateChecksum(payload);
+        message.writeUInt32LE(checksum, 12); // Set checksum in header
         this.socket.write(message);
     }
 
     // Handle incoming messages
     handleMessage(data) {
-        if (data.length < 16) {
+        if (data.length < HEADER_SIZE) {
             console.error('Invalid message: too short');
             return;
         }
@@ -119,7 +171,7 @@ class PolyCallClient extends EventEmitter {
             checksum: data.readUInt32LE(12)
         };
 
-        const payload = data.slice(16, 16 + header.payloadLength);
+        const payload = data.slice(HEADER_SIZE, HEADER_SIZE + header.payloadLength);
         
         // Verify checksum
         const calculatedChecksum = this.calculateChecksum(payload);
@@ -128,63 +180,132 @@ class PolyCallClient extends EventEmitter {
             return;
         }
 
-        // Handle different message types
+        this.processMessage(header, payload);
+    }
+
+    // Process verified message
+    processMessage(header, payload) {
         switch (header.type) {
             case MESSAGE_TYPES.HANDSHAKE:
                 this.emit('handshake', header.sequence);
                 break;
-            case MESSAGE_TYPES.RESPONSE:
-                this.emit('response', payload.toString());
+
+            case MESSAGE_TYPES.AUTH:
+                this.authenticated = true;
+                this.emit('authenticated', header.sequence);
                 break;
-            case MESSAGE_TYPES.ERROR:
-                this.emit('serverError', payload.toString());
+
+            case MESSAGE_TYPES.RESPONSE: {
+                const pending = this.pendingResponses.get(header.sequence);
+                if (pending) {
+                    clearTimeout(pending.timer);
+                    this.pendingResponses.delete(header.sequence);
+                    pending.resolve({
+                        sequence: header.sequence,
+                        data: payload.toString()
+                    });
+                }
+                this.emit('response', {
+                    sequence: header.sequence,
+                    data: payload.toString()
+                });
                 break;
+            }
+
+            case MESSAGE_TYPES.ERROR: {
+                const pending = this.pendingResponses.get(header.sequence);
+                if (pending) {
+                    clearTimeout(pending.timer);
+                    this.pendingResponses.delete(header.sequence);
+                    pending.reject(new Error(payload.toString()));
+                }
+                this.emit('serverError', {
+                    sequence: header.sequence,
+                    error: payload.toString()
+                });
+                break;
+            }
+
+            case MESSAGE_TYPES.HEARTBEAT:
+                this.emit('heartbeat', header.sequence);
+                break;
+
             default:
-                console.log('Received message type:', header.type);
+                console.warn('Unknown message type:', header.type);
         }
     }
 
-    // Close connection
+    // Handle disconnection
+    handleDisconnect() {
+        this.connected = false;
+        this.authenticated = false;
+        this.stopHeartbeat();
+        
+        // Clear pending responses
+        for (const [sequence, pending] of this.pendingResponses) {
+            clearTimeout(pending.timer);
+            pending.reject(new Error('Connection closed'));
+            this.pendingResponses.delete(sequence);
+        }
+
+        this.emit('disconnected');
+
+        // Attempt reconnection if enabled
+        if (this.options.reconnect && 
+            this.reconnectAttempts < this.options.maxRetries) {
+            this.reconnectAttempts++;
+            setTimeout(() => {
+                console.log(`Attempting reconnection (${this.reconnectAttempts}/${this.options.maxRetries})`);
+                this.establishConnection();
+            }, 1000 * this.reconnectAttempts);
+        }
+    }
+
+    // Start heartbeat
+    startHeartbeat() {
+        this.stopHeartbeat();
+        this.heartbeatTimer = setInterval(() => {
+            if (this.connected) {
+                const header = this.createHeader(
+                    MESSAGE_TYPES.HEARTBEAT,
+                    0,
+                    PROTOCOL_FLAGS.NONE
+                );
+                this.sendMessage(header, Buffer.alloc(0));
+            }
+        }, this.options.heartbeatInterval);
+    }
+
+    // Stop heartbeat
+    stopHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
+
+    // Process queued messages after reconnection
+    processQueuedMessages() {
+        while (this.messageQueue.length > 0) {
+            const { command, timeout } = this.messageQueue.shift();
+            this.sendCommand(command, timeout).catch(console.error);
+        }
+    }
+
+    // Graceful disconnect
     disconnect() {
+        this.options.reconnect = false;
+        this.stopHeartbeat();
+        
         if (this.socket) {
             this.socket.end();
             this.socket = null;
-            this.connected = false;
         }
+        
+        this.connected = false;
+        this.authenticated = false;
+        this.messageQueue = [];
     }
-}
-
-// Usage example
-async function main() {
-    const client = new PolyCallClient();
-
-    client.on('handshake', (sequence) => {
-        console.log('Handshake successful, sequence:', sequence);
-        // After successful handshake, you can send commands
-        client.sendCommand('status');
-    });
-
-    client.on('response', (data) => {
-        console.log('Received response:', data);
-    });
-
-    client.on('error', (err) => {
-        console.error('Client error:', err);
-    });
-
-    // Connect to the PolyCall server
-    client.connect();
-
-    // Clean up on process exit
-    process.on('SIGINT', () => {
-        console.log('\nDisconnecting...');
-        client.disconnect();
-        process.exit();
-    });
-}
-
-if (require.main === module) {
-    main().catch(console.error);
 }
 
 module.exports = PolyCallClient;
