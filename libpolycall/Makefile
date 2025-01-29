@@ -2,6 +2,19 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -I./include -fPIC
 LDFLAGS := -pthread -lssl -lcrypto
+
+# Platform-specific settings
+ifeq ($(OS),Windows_NT)
+    LDFLAGS += -lws2_32
+    CFLAGS += -D_WIN32
+    SHARED_EXT := dll
+    EXE_EXT := .exe
+else
+    SHARED_EXT := so
+    EXE_EXT :=
+endif
+
+# Debug/Release flags
 DEBUG_FLAGS := -g -DDEBUG
 RELEASE_FLAGS := -O2 -DNDEBUG
 
@@ -20,12 +33,12 @@ DEPS := $(OBJS:.o=.d)
 # Main executable
 MAIN_SRC := main.c
 MAIN_OBJ := $(BUILD_DIR)/main.o
-EXECUTABLE := polycall
+EXECUTABLE := polycall$(EXE_EXT)
 
 # Library name
 LIB_NAME := libpolycall
 STATIC_LIB := $(LIB_DIR)/$(LIB_NAME).a
-SHARED_LIB := $(LIB_DIR)/$(LIB_NAME).so
+SHARED_LIB := $(LIB_DIR)/$(LIB_NAME).$(SHARED_EXT)
 
 # Installation paths
 PREFIX := /usr/local
@@ -72,9 +85,10 @@ $(SHARED_LIB): $(OBJS)
 $(BIN_DIR)/$(EXECUTABLE): $(MAIN_OBJ) $(STATIC_LIB)
 	$(CC) $^ -o $@ $(LDFLAGS) -L$(LIB_DIR) -l:$(LIB_NAME).a
 
-# Install
+# Install (Unix-like systems only)
 .PHONY: install
 install: all
+ifneq ($(OS),Windows_NT)
 	@mkdir -p $(INSTALL_INC_DIR)
 	@mkdir -p $(INSTALL_LIB_DIR)
 	@mkdir -p $(INSTALL_BIN_DIR)
@@ -82,13 +96,16 @@ install: all
 	cp $(STATIC_LIB) $(SHARED_LIB) $(INSTALL_LIB_DIR)
 	cp $(BIN_DIR)/$(EXECUTABLE) $(INSTALL_BIN_DIR)
 	ldconfig
+endif
 
-# Uninstall
+# Uninstall (Unix-like systems only)
 .PHONY: uninstall
 uninstall:
+ifneq ($(OS),Windows_NT)
 	rm -rf $(INSTALL_INC_DIR)
 	rm -f $(INSTALL_LIB_DIR)/$(LIB_NAME).*
 	rm -f $(INSTALL_BIN_DIR)/$(EXECUTABLE)
+endif
 
 # Clean build files
 .PHONY: clean
@@ -110,7 +127,7 @@ help:
 	@echo "  debug      - Build with debug flags"
 	@echo "  release    - Build with release flags"
 	@echo "  clean      - Remove build files"
-	@echo "  install    - Install libraries and headers"
-	@echo "  uninstall  - Remove installed files"
+	@echo "  install    - Install libraries and headers (Unix-like only)"
+	@echo "  uninstall  - Remove installed files (Unix-like only)"
 	@echo "  distclean  - Remove all generated files"
 	@echo "  help       - Show this help message"
