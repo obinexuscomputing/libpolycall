@@ -4,12 +4,22 @@ const EventEmitter = require('events');
 class State extends EventEmitter {
     constructor(name, options = {}) {
         super();
+        
+        // Ensure name is a string and not empty
+        if (!name || typeof name !== 'string') {
+            throw new Error('State name must be a non-empty string');
+        }
+        
         this.name = name;
         this.isLocked = false;
         this.handlers = new Map();
         this.metadata = new Map();
         this.transitions = new Set();
-        this.endpoint = options.endpoint || `/${name.toLowerCase()}`;
+        
+        // Safely create endpoint from name
+        const defaultEndpoint = `/${name.trim().toLowerCase().replace(/\s+/g, '-')}`;
+        this.endpoint = options.endpoint || defaultEndpoint;
+        
         this.timeout = options.timeout || 5000;
         this.retryCount = options.retryCount || 3;
         
@@ -18,7 +28,6 @@ class State extends EventEmitter {
         this.metadata.set('version', 1);
         this.metadata.set('lastModified', Date.now());
     }
-
     // Handler management
     addHandler(event, handler) {
         if (typeof handler !== 'function') {

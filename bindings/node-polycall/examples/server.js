@@ -4,18 +4,44 @@ const Router = require('../src/modules/Router');
 const StateMachine = require('../src/modules/StateMachine');
 const State = require('../src/modules/State');
 const NetworkEndpoint = require('../src/modules/NetworkEndpoint');
-const { ProtocolHandler, PROTOCOL_CONSTANTS, MESSAGE_TYPES, PROTOCOL_FLAGS } = require('../src/modules/ProtocolHandler');
+const { ProtocolHandler } = require('../src/modules/ProtocolHandler');
 
 // Initialize PolyCall components
 const stateMachine = new StateMachine();
 const router = new Router();
 const networkEndpoint = new NetworkEndpoint({ port: 8080 });
 const protocolHandler = new ProtocolHandler();
+
+// Initialize state machine
+try {
+    // Define states with explicit string names
+    const initState = new State('INITIAL', { endpoint: '/initial' });
+    const readyState = new State('READY', { endpoint: '/ready' });
+    const runningState = new State('RUNNING', { endpoint: '/running' });
+    const errorState = new State('ERROR', { endpoint: '/error' });
+
+    // Add states to state machine
+    stateMachine.addState(initState);
+    stateMachine.addState(readyState);
+    stateMachine.addState(runningState);
+    stateMachine.addState(errorState);
+
+    // Define valid transitions
+    stateMachine.addTransition(initState.name, readyState.name);
+    stateMachine.addTransition(readyState.name, runningState.name);
+    stateMachine.addTransition(runningState.name, errorState.name);
+
+} catch (error) {
+    console.error('Failed to initialize state machine:', error);
+    process.exit(1);
+}
+// Create PolyCall client
 const polyCallClient = new PolyCallClient({ 
-    endpoint: networkEndpoint, 
-    router,
-    stateMachine
+  endpoint: networkEndpoint, 
+  router,
+  stateMachine
 });
+
 
 // Initialize state machine with proper string state names
 const states = {
@@ -37,9 +63,9 @@ stateMachine.addTransition(states.RUNNING.name, states.ERROR.name);
 
 // Simple in-memory data store
 const store = {
-    books: new Map(),
-    users: new Map(),
-    lendings: new Map()
+  books: new Map(),
+  users: new Map(),
+  lendings: new Map()
 };
 
 // Authentication middleware
@@ -56,21 +82,21 @@ const authMiddleware = async (req, res, next) => {
 
 // Route handlers
 router.addRoute('/books', {
-    GET: async (ctx) => {
-        return Array.from(store.books.values());
-    },
-    POST: async (ctx) => {
-        const book = ctx.data;
-        if (!book.title || !book.author) {
-            throw new Error('Book must have title and author');
-        }
-        const id = Date.now().toString();
-        book.id = id;
-        book.createdAt = new Date();
-        store.books.set(id, book);
-        return book;
-    }
+  GET: async (ctx) => {
+      return Array.from(store.books.values());
+  },
+  POST: async (ctx) => {
+      const book = ctx.data;
+      if (!book.title || !book.author) {
+          throw new Error('Book must have title and author');
+      }
+      const id = Date.now().toString();
+      book.id = id;
+      store.books.set(id, book);
+      return book;
+  }
 });
+
 
 router.addRoute('/users', {
     GET: async (ctx) => {
@@ -148,53 +174,38 @@ protocolHandler.on('command', async ({ command, data }) => {
 
 // Create HTTP server
 const server = http.createServer(async (req, res) => {
-    try {
-        let data = '';
-        
-        req.on('data', chunk => {
-            data += chunk;
-        });
+  try {
+      let data = '';
+      
+      req.on('data', chunk => {
+          data += chunk;
+      });
 
-        req.on('end', async () => {
-            try {
-                const requestData = data ? JSON.parse(data) : {};
+      req.on('end', async () => {
+          try {
+              const requestData = data ? JSON.parse(data) : {};
+              const result = await router.handleRequest(req.url, req.method, requestData);
 
-                // Create protocol message
-                const message = protocolHandler.createMessage(
-                    MESSAGE_TYPES.COMMAND,
-                    {
-                        path: req.url,
-                        method: req.method,
-                        data: requestData
-                    },
-                    PROTOCOL_FLAGS.RELIABLE
-                );
+              res.writeHead(200, { 
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*',
+                  'Access-Control-Allow-Methods': 'GET, POST'
+              });
+              res.end(JSON.stringify(result));
 
-                // Process request using PolyCall
-                const result = await router.handleRequest(req.url, req.method, requestData);
+          } catch (error) {
+              console.error('Request error:', error);
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: error.message }));
+          }
+      });
 
-                res.writeHead(200, { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE',
-                    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-                });
-                res.end(JSON.stringify(result));
-
-            } catch (error) {
-                console.error('Request error:', error);
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: error.message }));
-            }
-        });
-
-    } catch (error) {
-        console.error('Server error:', error);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Internal server error' }));
-    }
+  } catch (error) {
+      console.error('Server error:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+  }
 });
-
 // Error handler
 server.on('error', (error) => {
     console.error('Server error:', error);
@@ -210,18 +221,20 @@ const port = 8080;
 server.listen(port, () => {
     console.log(`Library server running at http://localhost:${port}`);
     try {
-        stateMachine.executeTransition(states.READY.name, states.RUNNING.name);
+        // Transition to ready state
+        stateMachine.executeTransition('INITIAL', 'READY');
     } catch (error) {
-        console.error('Startup state transition error:', error);
+        console.error('Failed to transition to ready state:', error);
     }
 });
 
-// Handle shutdown gracefully
+
+// Handle shutdown
 process.on('SIGINT', () => {
-    console.log('\nShutting down gracefully...');
-    server.close(() => {
-        polyCallClient.disconnect();
-        console.log('Server stopped');
-        process.exit(0);
-    });
+  console.log('\nShutting down gracefully...');
+  server.close(() => {
+      polyCallClient.disconnect();
+      console.log('Server stopped');
+      process.exit(0);
+  });
 });
