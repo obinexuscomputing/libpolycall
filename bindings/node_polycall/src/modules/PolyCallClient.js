@@ -2,8 +2,8 @@
 const EventEmitter = require('events');
 const NetworkEndpoint = require('./NetworkEndpoint');
 const Router = require('./Router');
-const StateMachine = require('./StateMachine');
-const { MESSAGE_TYPES, PROTOCOL_FLAGS } = require('./ProtocolHandler');
+const StateMachine = require('../StateMachine');
+const { MESSAGE_TYPES, PROTOCOL_FLAGS } = require('../ProtocolHandler');
 
 class PolyCallClient extends EventEmitter {
     constructor(options = {}) {
