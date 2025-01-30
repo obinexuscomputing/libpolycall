@@ -1,7 +1,7 @@
 // NetworkEndpoint.js - PolyCall Network Endpoint Implementation
 const net = require('net');
 const EventEmitter = require('events');
-const { ProtocolHandler } = require('../ProtocolHandler');
+const { ProtocolHandler } = require('./ProtocolHandler');
 
 class NetworkEndpoint extends EventEmitter {
     constructor(options = {}) {
