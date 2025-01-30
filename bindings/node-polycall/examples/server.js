@@ -1,10 +1,7 @@
-const http = require('http');
-const PolyCallClient = require('../src/modules/PolyCallClient');
-const Router = require('../src/modules/Router');
-const StateMachine = require('../src/modules/StateMachine');
-const State = require('../src/modules/State');
-const NetworkEndpoint = require('../src/modules/NetworkEndpoint');
-const { ProtocolHandler, PROTOCOL_CONSTANTS, MESSAGE_TYPES, PROTOCOL_FLAGS } = require('../src/modules/ProtocolHandler');
+import http from 'http';
+import Router from '../src/modules/Router';
+import StateMachine from '../src/modules/StateMachine';
+import NetworkEndpoint from '../src/modules/NetworkEndpoint';
 
 // Initialize PolyCall components
 const stateMachine = new StateMachine();
@@ -13,7 +10,7 @@ const networkEndpoint = new NetworkEndpoint({ port: 8080 });
 const polyCallClient = new PolyCallClient({ endpoint: networkEndpoint, router, stateMachine });
 
 // Bind state machine to router
-router.bindStateMachine(stateMachine);
+// const polyCallClient = new PolyCallClient({ endpoint: networkEndpoint, router, stateMachine });
 
 // Create HTTP server
 const server = http.createServer(async (req, res) => {
