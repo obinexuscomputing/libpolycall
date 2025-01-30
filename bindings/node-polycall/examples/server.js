@@ -50,21 +50,22 @@ const store = {
     lendings: new Map()
 };
 
-// Route handlers
-router.addRoute('/books', {
-    GET: async (ctx) => {
-        return Array.from(store.books.values());
-    },
-    POST: async (ctx) => {
-        const book = ctx.data;
-        if (!book.title || !book.author) {
-            throw new Error('Book must have title and author');
-        }
-        const id = Date.now().toString();
-        book.id = id;
-        store.books.set(id, book);
-        return book;
-    }
+// Update the route handler in server.js
+router.addRoute('/books', async (ctx) => {
+  if (ctx.method === 'GET') {
+      return Array.from(store.books.values());
+  } 
+  else if (ctx.method === 'POST') {
+      const book = ctx.data;
+      if (!book.title || !book.author) {
+          throw new Error('Book must have title and author');
+      }
+      const id = Date.now().toString();
+      book.id = id;
+      store.books.set(id, book);
+      return book;
+  }
+  throw new Error(`Method ${ctx.method} not supported`);
 });
 
 // Create HTTP server
