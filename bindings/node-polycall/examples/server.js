@@ -1,46 +1,11 @@
 const http = require('http');
-const PolyCallClient = require('../src/modules/PolyCallClient');
 const Router = require('../src/modules/Router');
 const StateMachine = require('../src/modules/StateMachine');
 const State = require('../src/modules/State');
-const NetworkEndpoint = require('../src/modules/NetworkEndpoint');
-const { ProtocolHandler } = require('../src/modules/ProtocolHandler');
 
 // Initialize components
 const router = new Router();
-const networkEndpoint = new NetworkEndpoint({ port: 8080 });
-const protocolHandler = new ProtocolHandler();
-
-// Initialize state machine
-const stateMachine = new StateMachine({
-    allowSelfTransitions: false,
-    validateStateChange: true,
-    recordHistory: true
-});
-
-// Initialize states
-try {
-    const states = {
-        init: stateMachine.addState('INIT', { endpoint: '/init' }),
-        ready: stateMachine.addState('READY', { endpoint: '/ready' }),
-        running: stateMachine.addState('RUNNING', { endpoint: '/running' }),
-        error: stateMachine.addState('ERROR', { endpoint: '/error' })
-    };
-
-    stateMachine.addTransition('INIT', 'READY');
-    stateMachine.addTransition('READY', 'RUNNING');
-    stateMachine.addTransition('RUNNING', 'ERROR');
-} catch (error) {
-    console.error('Failed to initialize state machine:', error);
-    process.exit(1);
-}
-
-// Create PolyCall client
-const polyCallClient = new PolyCallClient({ 
-    endpoint: networkEndpoint, 
-    router,
-    stateMachine
-});
+const stateMachine = new StateMachine();
 
 // Data store
 const store = {
@@ -49,122 +14,115 @@ const store = {
     lendings: new Map()
 };
 
-// Register routes
-router.addRoute('/books', {
-    get: async (ctx) => {
-        return Array.from(store.books.values());
+// Define route handlers separately
+const bookHandlers = {
+    GET: async (ctx) => {
+        const books = Array.from(store.books.values());
+        return { success: true, data: books };
     },
-    post: async (ctx) => {
+    POST: async (ctx) => {
         const book = ctx.data;
         if (!book.title || !book.author) {
             throw new Error('Book must have title and author');
         }
         const id = Date.now().toString();
-        book.id = id;
-        store.books.set(id, book);
-        return book;
+        const newBook = {
+            id,
+            title: book.title,
+            author: book.author,
+            createdAt: new Date()
+        };
+        store.books.set(id, newBook);
+        return { success: true, data: newBook };
     }
-});
-
-// CORS headers
-const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Max-Age': '86400'
 };
 
-// Create HTTP server
-const server = http.createServer(async (req, res) => {
-    // Handle CORS preflight
-    if (req.method === 'OPTIONS') {
-        res.writeHead(204, corsHeaders);
-        res.end();
-        return;
-    }
+// Register routes
+router.addRoute('/books', bookHandlers);
 
-    try {
+// CORS middleware
+const corsMiddleware = async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return true; // Signal that response is handled
+    }
+    return false; // Continue processing
+};
+
+// Request parser
+const parseRequest = async (req) => {
+    return new Promise((resolve, reject) => {
         let data = '';
         
         req.on('data', chunk => {
             data += chunk;
         });
-
-        req.on('end', async () => {
+        
+        req.on('end', () => {
             try {
-                const requestData = data ? JSON.parse(data) : {};
-                
-                // Handle the request using the router
-                const method = req.method.toLowerCase();
-                const path = req.url;
-                
-                const context = {
-                    method,
-                    path,
-                    data: requestData,
-                    headers: req.headers
+                const parsed = {
+                    method: req.method,
+                    url: req.url,
+                    data: data ? JSON.parse(data) : {}
                 };
-
-                const handler = router.findRoute(path)?.[method];
-                
-                if (!handler) {
-                    throw new Error(`No handler found for ${method} ${path}`);
-                }
-
-                const result = await handler(context);
-
-                res.writeHead(200, { 
-                    'Content-Type': 'application/json',
-                    ...corsHeaders
-                });
-                res.end(JSON.stringify(result));
-
+                resolve(parsed);
             } catch (error) {
-                console.error('Request error:', error);
-                res.writeHead(500, { 
-                    'Content-Type': 'application/json',
-                    ...corsHeaders 
-                });
-                res.end(JSON.stringify({ error: error.message }));
+                reject(error);
             }
         });
+        
+        req.on('error', reject);
+    });
+};
+
+// Create HTTP server
+const server = http.createServer(async (req, res) => {
+    try {
+        // Handle CORS
+        const corsHandled = await corsMiddleware(req, res);
+        if (corsHandled) return;
+
+        // Parse request
+        const { method, url, data } = await parseRequest(req);
+        
+        // Find and execute route handler
+        const handler = router.routes.get(url)?.[method];
+        if (!handler) {
+            throw new Error(`No handler found for ${method} ${url}`);
+        }
+
+        const context = { method, url, data };
+        const result = await handler(context);
+
+        // Send response
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
 
     } catch (error) {
-        console.error('Server error:', error);
-        res.writeHead(500, { 
-            'Content-Type': 'application/json',
-            ...corsHeaders 
-        });
-        res.end(JSON.stringify({ error: 'Internal server error' }));
-    }
-});
-
-// Error handler
-server.on('error', (error) => {
-    console.error('Server error:', error);
-    try {
-        stateMachine.executeTransition('ERROR');
-    } catch (err) {
-        console.error('State transition error:', err);
+        console.error('Request error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+            success: false, 
+            error: error.message 
+        }));
     }
 });
 
 // Start server
 const port = 8080;
 server.listen(port, () => {
-    console.log(`Library server running at http://localhost:${port}`);
-    try {
-        stateMachine.executeTransition('READY');
-    } catch (error) {
-        console.error('Failed to transition to ready state:', error);
-    }
+    console.log(`Server running at http://localhost:${port}`);
 });
 
-// Graceful shutdown
+// Handle shutdown
 process.on('SIGINT', () => {
     console.log('\nShutting down gracefully...');
     server.close(() => {
-        polyCallClient.disconnect();
         console.log('Server stopped');
         process.exit(0);
     });
