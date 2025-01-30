@@ -7,7 +7,6 @@ const options = {
     'Content-Type': 'application/json'
   }
 };
-
 // Test POST request
 const postData = JSON.stringify({
   title: 'Test Book',
