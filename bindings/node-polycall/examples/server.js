@@ -11,15 +11,15 @@ const router = new Router();
 const networkEndpoint = new NetworkEndpoint({ port: 8080 });
 const protocolHandler = new ProtocolHandler();
 
-// Initialize state machine with proper state names
+// Initialize state machine
 const stateMachine = new StateMachine({
     allowSelfTransitions: false,
     validateStateChange: true,
     recordHistory: true
 });
 
+// Initialize states
 try {
-    // Create states with explicit string names
     const states = {
         init: stateMachine.addState('INIT', { endpoint: '/init' }),
         ready: stateMachine.addState('READY', { endpoint: '/ready' }),
@@ -27,7 +27,6 @@ try {
         error: stateMachine.addState('ERROR', { endpoint: '/error' })
     };
 
-    // Add transitions between states
     stateMachine.addTransition('INIT', 'READY');
     stateMachine.addTransition('READY', 'RUNNING');
     stateMachine.addTransition('RUNNING', 'ERROR');
@@ -36,40 +35,54 @@ try {
     process.exit(1);
 }
 
-// Create PolyCall client with initialized components
+// Create PolyCall client
 const polyCallClient = new PolyCallClient({ 
     endpoint: networkEndpoint, 
     router,
     stateMachine
 });
 
-// Simple in-memory data store
+// Data store
 const store = {
     books: new Map(),
     users: new Map(),
     lendings: new Map()
 };
 
-// Update the route handler in server.js
-router.addRoute('/books', async (ctx) => {
-  if (ctx.method === 'GET') {
-      return Array.from(store.books.values());
-  } 
-  else if (ctx.method === 'POST') {
-      const book = ctx.data;
-      if (!book.title || !book.author) {
-          throw new Error('Book must have title and author');
-      }
-      const id = Date.now().toString();
-      book.id = id;
-      store.books.set(id, book);
-      return book;
-  }
-  throw new Error(`Method ${ctx.method} not supported`);
+// Register routes
+router.addRoute('/books', {
+    get: async (ctx) => {
+        return Array.from(store.books.values());
+    },
+    post: async (ctx) => {
+        const book = ctx.data;
+        if (!book.title || !book.author) {
+            throw new Error('Book must have title and author');
+        }
+        const id = Date.now().toString();
+        book.id = id;
+        store.books.set(id, book);
+        return book;
+    }
 });
+
+// CORS headers
+const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Max-Age': '86400'
+};
 
 // Create HTTP server
 const server = http.createServer(async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204, corsHeaders);
+        res.end();
+        return;
+    }
+
     try {
         let data = '';
         
@@ -80,27 +93,59 @@ const server = http.createServer(async (req, res) => {
         req.on('end', async () => {
             try {
                 const requestData = data ? JSON.parse(data) : {};
-                const result = await router.handleRequest(req.url, req.method, requestData);
+                
+                // Handle the request using the router
+                const method = req.method.toLowerCase();
+                const path = req.url;
+                
+                const context = {
+                    method,
+                    path,
+                    data: requestData,
+                    headers: req.headers
+                };
+
+                const handler = router.findRoute(path)?.[method];
+                
+                if (!handler) {
+                    throw new Error(`No handler found for ${method} ${path}`);
+                }
+
+                const result = await handler(context);
 
                 res.writeHead(200, { 
                     'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Methods': 'GET, POST',
-                    'Access-Control-Allow-Headers': 'Content-Type'
+                    ...corsHeaders
                 });
                 res.end(JSON.stringify(result));
 
             } catch (error) {
                 console.error('Request error:', error);
-                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.writeHead(500, { 
+                    'Content-Type': 'application/json',
+                    ...corsHeaders 
+                });
                 res.end(JSON.stringify({ error: error.message }));
             }
         });
 
     } catch (error) {
         console.error('Server error:', error);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.writeHead(500, { 
+            'Content-Type': 'application/json',
+            ...corsHeaders 
+        });
         res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
+});
+
+// Error handler
+server.on('error', (error) => {
+    console.error('Server error:', error);
+    try {
+        stateMachine.executeTransition('ERROR');
+    } catch (err) {
+        console.error('State transition error:', err);
     }
 });
 
@@ -109,14 +154,13 @@ const port = 8080;
 server.listen(port, () => {
     console.log(`Library server running at http://localhost:${port}`);
     try {
-        // Transition from INIT to READY
         stateMachine.executeTransition('READY');
     } catch (error) {
         console.error('Failed to transition to ready state:', error);
     }
 });
 
-// Handle graceful shutdown
+// Graceful shutdown
 process.on('SIGINT', () => {
     console.log('\nShutting down gracefully...');
     server.close(() => {
