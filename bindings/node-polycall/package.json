@@ -1,5 +1,5 @@
 {
-    "name": "node-polycall",
+    "name": "@obinexuscomputing/node-polycall",
     "version": "1.0.0",
     "description": "Node.js bindings for libpolycall - A Program First Data-Oriented Program Interface",
     "main": "src/index.js",
