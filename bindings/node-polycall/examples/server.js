@@ -3,28 +3,30 @@ const Router = require('../src/modules/Router');
 const StateMachine = require('../src/modules/StateMachine');
 const State = require('../src/modules/State');
 
-// Initialize components
+// Initialize router
 const router = new Router();
-const stateMachine = new StateMachine();
 
 // Data store
 const store = {
-    books: new Map(),
-    users: new Map(),
-    lendings: new Map()
+    books: new Map()
 };
 
-// Define route handlers separately
+// Define route handlers
 const bookHandlers = {
     GET: async (ctx) => {
         const books = Array.from(store.books.values());
         return { success: true, data: books };
     },
+    
     POST: async (ctx) => {
         const book = ctx.data;
+        
+        // Validate input
         if (!book.title || !book.author) {
             throw new Error('Book must have title and author');
         }
+        
+        // Create new book
         const id = Date.now().toString();
         const newBook = {
             id,
@@ -32,6 +34,8 @@ const bookHandlers = {
             author: book.author,
             createdAt: new Date()
         };
+        
+        // Save book
         store.books.set(id, newBook);
         return { success: true, data: newBook };
     }
@@ -41,7 +45,7 @@ const bookHandlers = {
 router.addRoute('/books', bookHandlers);
 
 // CORS middleware
-const corsMiddleware = async (req, res) => {
+function handleCORS(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -49,81 +53,65 @@ const corsMiddleware = async (req, res) => {
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
-        return true; // Signal that response is handled
+        return true;
     }
-    return false; // Continue processing
-};
+    return false;
+}
 
-// Request parser
-const parseRequest = async (req) => {
+// Request body parser
+async function parseBody(req) {
     return new Promise((resolve, reject) => {
-        let data = '';
-        
-        req.on('data', chunk => {
-            data += chunk;
-        });
-        
+        let body = '';
+        req.on('data', chunk => body += chunk);
         req.on('end', () => {
             try {
-                const parsed = {
-                    method: req.method,
-                    url: req.url,
-                    data: data ? JSON.parse(data) : {}
-                };
-                resolve(parsed);
+                resolve(body ? JSON.parse(body) : {});
             } catch (error) {
-                reject(error);
+                reject(new Error('Invalid JSON'));
             }
         });
-        
         req.on('error', reject);
     });
-};
+}
 
 // Create HTTP server
 const server = http.createServer(async (req, res) => {
     try {
         // Handle CORS
-        const corsHandled = await corsMiddleware(req, res);
-        if (corsHandled) return;
+        if (handleCORS(req, res)) return;
 
-        // Parse request
-        const { method, url, data } = await parseRequest(req);
-        
-        // Find and execute route handler
-        const handler = router.routes.get(url)?.[method];
-        if (!handler) {
-            throw new Error(`No handler found for ${method} ${url}`);
-        }
+        // Parse request body
+        const body = await parseBody(req);
 
-        const context = { method, url, data };
-        const result = await handler(context);
+        // Handle request through router
+        const result = await router.handleRequest(
+            req.url,
+            req.method,
+            body
+        );
 
-        // Send response
+        // Send success response
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
 
     } catch (error) {
-        console.error('Request error:', error);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-            success: false, 
-            error: error.message 
+        // Determine status code based on error
+        const status = error.message.includes('not found') ? 404 : 
+                      error.message.includes('not allowed') ? 405 : 
+                      500;
+
+        // Send error response
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: false,
+            error: error.message
         }));
     }
 });
 
 // Start server
-const port = 8080;
-server.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
-});
-
-// Handle shutdown
-process.on('SIGINT', () => {
-    console.log('\nShutting down gracefully...');
-    server.close(() => {
-        console.log('Server stopped');
-        process.exit(0);
-    });
+const PORT = 8080;
+server.listen(PORT, () => {
+    console.log(`Server running at http://localhost:${PORT}`);
+    router.printRoutes();
 });

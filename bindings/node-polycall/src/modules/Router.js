@@ -1,173 +1,103 @@
-// Router.js - PolyCall Router Implementation
+// Router.js
 const EventEmitter = require('events');
 const { URL } = require('url');
 
 class Router extends EventEmitter {
-    constructor(options = {}) {
+    constructor() {
         super();
         this.routes = new Map();
-        this.middleware = [];
-        this.stateEndpoints = new Map();
-        this.options = {
-            baseUrl: 'http://localhost',
-            caseSensitive: false,
-            strict: false,
-            ...options
-        };
     }
 
-    // Route registration
-    addRoute(path, handler, methods = ['GET']) {
-        if (typeof path !== 'string' || !path.startsWith('/')) {
-            throw new Error('Path must be a string starting with /');
+    /**
+     * Register a route with method-specific handlers
+     */
+    addRoute(path, handlers) {
+        // If handlers is a function, treat it as a generic handler
+        if (typeof handlers === 'function') {
+            this.routes.set(path, {
+                handler: handlers,
+                methods: new Set(['GET', 'POST'])  // Default methods
+            });
+            return;
         }
 
-        const route = {
-            path: this.normalizePath(path),
-            handler,
-            methods: new Set(methods.map(m => m.toUpperCase())),
-            middleware: []
-        };
-
-        this.routes.set(route.path, route);
-        return this;
-    }
-
-    // State endpoint mapping
-    mapStateToEndpoint(state, endpoint) {
-        if (!endpoint.startsWith('/')) {
-            endpoint = `/${endpoint}`;
-        }
-        this.stateEndpoints.set(state.name, this.normalizePath(endpoint));
-        
-        // Add default routes for state operations
-        this.addRoute(endpoint, async (ctx) => {
-            return { state: state.verify() };
-        }, ['GET']);
-
-        this.addRoute(`${endpoint}/lock`, async (ctx) => {
-            await state.lock();
-            return { status: 'locked' };
-        }, ['POST']);
-
-        this.addRoute(`${endpoint}/unlock`, async (ctx) => {
-            await state.unlock();
-            return { status: 'unlocked' };
-        }, ['POST']);
-
-        return this;
-    }
-
-    // Middleware registration
-    use(middleware) {
-        if (typeof middleware !== 'function') {
-            throw new Error('Middleware must be a function');
-        }
-        this.middleware.push(middleware);
-        return this;
-    }
-
-    // Request handling
-    async handleRequest(path, method = 'GET', data = {}) {
-        const normalizedPath = this.normalizePath(path);
-        const route = this.findRoute(normalizedPath);
-
-        if (!route) {
-            throw new Error(`No route found for path: ${path}`);
-        }
-
-        if (!route.methods.has(method.toUpperCase())) {
-            throw new Error(`Method ${method} not allowed for path: ${path}`);
-        }
-
-        const context = {
-            path: normalizedPath,
-            method: method.toUpperCase(),
-            params: this.extractParams(route.path, normalizedPath),
-            query: this.parseQueryString(path),
-            data,
-            state: {},
-            router: this
-        };
-
-        try {
-            // Execute middleware chain
-            await this.executeMiddlewareChain([...this.middleware, ...route.middleware], context);
-
-            // Execute route handler
-            const result = await route.handler(context);
-            return result;
-
-        } catch (error) {
-            this.emit('error', error, context);
-            throw error;
+        // If handlers is an object with method-specific handlers
+        if (typeof handlers === 'object') {
+            const supportedMethods = Object.keys(handlers).map(m => m.toUpperCase());
+            
+            this.routes.set(path, {
+                handler: async (ctx) => {
+                    const method = ctx.method.toUpperCase();
+                    const methodHandler = handlers[method];
+                    
+                    if (!methodHandler) {
+                        throw new Error(`Method ${method} not allowed`);
+                    }
+                    
+                    return methodHandler(ctx);
+                },
+                methods: new Set(supportedMethods)
+            });
         }
     }
 
-    // Route matching
+    /**
+     * Find a matching route for the given path
+     */
     findRoute(path) {
-        // First try exact match
+        // Normalize the path
+        path = this.normalizePath(path);
+
+        // Try direct match first
         if (this.routes.has(path)) {
             return this.routes.get(path);
         }
 
-        // Then try pattern matching
-        for (const [routePath, route] of this.routes) {
-            if (this.matchPath(routePath, path)) {
-                return route;
-            }
-        }
-
+        // If no direct match, return null
         return null;
     }
 
-    // Path matching
-    matchPath(routePath, requestPath) {
-        const routeParts = routePath.split('/').filter(Boolean);
-        const requestParts = requestPath.split('/').filter(Boolean);
-
-        if (routeParts.length !== requestParts.length) {
-            return false;
+    /**
+     * Handle an incoming request
+     */
+    async handleRequest(path, method, data = {}) {
+        const route = this.findRoute(path);
+        
+        if (!route) {
+            throw new Error(`No route found for: ${path}`);
         }
 
-        for (let i = 0; i < routeParts.length; i++) {
-            const routePart = routeParts[i];
-            const requestPart = requestParts[i];
+        if (!route.methods.has(method.toUpperCase())) {
+            throw new Error(`Method ${method} not allowed for ${path}`);
+        }
 
-            if (routePart.startsWith(':')) {
-                continue; // Parameter match
-            }
+        const context = {
+            path,
+            method: method.toUpperCase(),
+            data,
+            params: {},
+            query: this.parseQueryString(path)
+        };
 
-            if (this.options.caseSensitive) {
-                if (routePart !== requestPart) return false;
+        try {
+            // Execute the route handler
+            if (typeof route.handler === 'function') {
+                return await route.handler(context);
             } else {
-                if (routePart.toLowerCase() !== requestPart.toLowerCase()) return false;
+                throw new Error('Invalid route handler');
             }
+        } catch (error) {
+            this.emit('error', error);
+            throw error;
         }
-
-        return true;
     }
 
-    // Parameter extraction
-    extractParams(routePath, requestPath) {
-        const params = {};
-        const routeParts = routePath.split('/').filter(Boolean);
-        const requestParts = requestPath.split('/').filter(Boolean);
-
-        for (let i = 0; i < routeParts.length; i++) {
-            if (routeParts[i].startsWith(':')) {
-                const paramName = routeParts[i].slice(1);
-                params[paramName] = requestParts[i];
-            }
-        }
-
-        return params;
-    }
-
-    // Query string parsing
+    /**
+     * Parse query string from path
+     */
     parseQueryString(path) {
         try {
-            const url = new URL(path, this.options.baseUrl);
+            const url = new URL(path, 'http://localhost');
             const params = {};
             url.searchParams.forEach((value, key) => {
                 params[key] = value;
@@ -178,121 +108,29 @@ class Router extends EventEmitter {
         }
     }
 
-    // Path normalization
+    /**
+     * Normalize a path string
+     */
     normalizePath(path) {
-        path = path.trim();
         if (!path.startsWith('/')) {
             path = '/' + path;
         }
-        if (this.options.strict) {
-            if (path.length > 1 && path.endsWith('/')) {
-                path = path.slice(0, -1);
-            }
+        // Remove trailing slash unless it's the root path
+        if (path.length > 1 && path.endsWith('/')) {
+            path = path.slice(0, -1);
         }
         return path;
     }
 
-    // Middleware execution
-    async executeMiddlewareChain(middlewares, context) {
-        let index = 0;
-
-        const next = async () => {
-            if (index >= middlewares.length) return;
-            const middleware = middlewares[index++];
-            await middleware(context, next);
-        };
-
-        await next();
-    }
-
-    // Utility methods
-    getRoutes() {
-        return Array.from(this.routes.entries()).map(([path, route]) => ({
-            path,
-            methods: Array.from(route.methods)
-        }));
-    }
-
-    getStateEndpoints() {
-        return Array.from(this.stateEndpoints.entries()).map(([state, endpoint]) => ({
-            state,
-            endpoint
-        }));
-    }
-
-    clearRoutes() {
-        this.routes.clear();
-        this.stateEndpoints.clear();
-        this.middleware = [];
-    }
-
-    // Debugging
+    /**
+     * Print registered routes (for debugging)
+     */
     printRoutes() {
         console.log('\nRegistered Routes:');
         for (const [path, route] of this.routes) {
-            console.log(`${Array.from(route.methods).join(',')} ${path}`);
+            const methods = Array.from(route.methods).join(',');
+            console.log(`${methods} ${path}`);
         }
-    }
-
-    // State machine integration helpers
-    bindStateMachine(stateMachine) {
-        // Add routes for state machine operations
-        this.addRoute('/states', async (ctx) => {
-            return {
-                current: stateMachine.getCurrentState()?.name,
-                states: stateMachine.getStateNames()
-            };
-        });
-
-        // Add route for state transitions
-        this.addRoute('/transition/:state', async (ctx) => {
-            const targetState = ctx.params.state;
-            await stateMachine.executeTransition(targetState);
-            return {
-                success: true,
-                currentState: stateMachine.getCurrentState().name
-            };
-        }, ['POST']);
-
-        // Add routes for state inspection
-        this.addRoute('/states/:state', async (ctx) => {
-            const state = stateMachine.getState(ctx.params.state);
-            return state.verify();
-        });
-
-        // Map all states to endpoints
-        for (const stateName of stateMachine.getStateNames()) {
-            const state = stateMachine.getState(stateName);
-            this.mapStateToEndpoint(state, `/states/${stateName}`);
-        }
-
-        return this;
-    }
-
-    // Error handling middleware
-    errorHandler() {
-        return async (ctx, next) => {
-            try {
-                await next();
-            } catch (error) {
-                this.emit('error', error, ctx);
-                throw error;
-            }
-        };
-    }
-
-    // Logging middleware
-    loggingMiddleware() {
-        return async (ctx, next) => {
-            const start = Date.now();
-            await next();
-            const duration = Date.now() - start;
-            this.emit('request', {
-                method: ctx.method,
-                path: ctx.path,
-                duration
-            });
-        };
     }
 }
 
