@@ -16,22 +16,27 @@ class Router extends EventEmitter {
         };
     }
 
-    // Route registration
-    addRoute(path, handler, methods = ['GET']) {
-        if (typeof path !== 'string' || !path.startsWith('/')) {
-            throw new Error('Path must be a string starting with /');
-        }
-
-        const route = {
-            path: this.normalizePath(path),
-            handler,
-            methods: new Set(methods.map(m => m.toUpperCase())),
-            middleware: []
-        };
-
-        this.routes.set(route.path, route);
-        return this;
+  // Route registration with method handling
+  addRoute(path, handler, methods = ['GET']) {
+    if (typeof path !== 'string' || !path.startsWith('/')) {
+        throw new Error('Path must be a string starting with /');
     }
+
+    // Convert handler object to function if needed
+    const routeHandler = typeof handler === 'object' 
+        ? this._createMethodHandler(handler)
+        : handler;
+
+    const route = {
+        path: this.normalizePath(path),
+        handler: routeHandler,
+        methods: new Set(methods.map(m => m.toUpperCase())),
+        middleware: []
+    };
+
+    this.routes.set(route.path, route);
+    return this;
+}
 
     // State endpoint mapping
     mapStateToEndpoint(state, endpoint) {
@@ -57,7 +62,19 @@ class Router extends EventEmitter {
 
         return this;
     }
-
+  // Create method-specific handler
+  _createMethodHandler(handlers) {
+    return async (ctx) => {
+        const method = ctx.method.toUpperCase();
+        const handler = handlers[method];
+        
+        if (!handler) {
+            throw new Error(`Method ${method} not allowed`);
+        }
+        
+        return handler(ctx);
+    };
+}
     // Middleware registration
     use(middleware) {
         if (typeof middleware !== 'function') {
@@ -66,18 +83,14 @@ class Router extends EventEmitter {
         this.middleware.push(middleware);
         return this;
     }
-
-    // Request handling
+;
+         // Request handling
     async handleRequest(path, method = 'GET', data = {}) {
         const normalizedPath = this.normalizePath(path);
         const route = this.findRoute(normalizedPath);
 
         if (!route) {
             throw new Error(`No route found for path: ${path}`);
-        }
-
-        if (!route.methods.has(method.toUpperCase())) {
-            throw new Error(`Method ${method} not allowed for path: ${path}`);
         }
 
         const context = {
@@ -93,17 +106,16 @@ class Router extends EventEmitter {
         try {
             // Execute middleware chain
             await this.executeMiddlewareChain([...this.middleware, ...route.middleware], context);
-
+            
             // Execute route handler
             const result = await route.handler(context);
             return result;
-
         } catch (error) {
             this.emit('error', error, context);
             throw error;
         }
     }
-
+    
     // Route matching
     findRoute(path) {
         // First try exact match
@@ -121,8 +133,8 @@ class Router extends EventEmitter {
         return null;
     }
 
-    // Path matching
-    matchPath(routePath, requestPath) {
+     // Path matching
+     matchPath(routePath, requestPath) {
         const routeParts = routePath.split('/').filter(Boolean);
         const requestParts = requestPath.split('/').filter(Boolean);
 
@@ -148,70 +160,74 @@ class Router extends EventEmitter {
         return true;
     }
 
-    // Parameter extraction
-    extractParams(routePath, requestPath) {
+
+  // Parameter extraction
+  extractParams(routePath, requestPath) {
+    const params = {};
+    const routeParts = routePath.split('/').filter(Boolean);
+    const requestParts = requestPath.split('/').filter(Boolean);
+
+    for (let i = 0; i < routeParts.length; i++) {
+        if (routeParts[i].startsWith(':')) {
+            const paramName = routeParts[i].slice(1);
+            params[paramName] = requestParts[i];
+        }
+    }
+
+    return params;
+}
+
+ // Parse query string
+ parseQueryString(path) {
+    try {
+        const url = new URL(path, this.options.baseUrl);
         const params = {};
-        const routeParts = routePath.split('/').filter(Boolean);
-        const requestParts = requestPath.split('/').filter(Boolean);
-
-        for (let i = 0; i < routeParts.length; i++) {
-            if (routeParts[i].startsWith(':')) {
-                const paramName = routeParts[i].slice(1);
-                params[paramName] = requestParts[i];
-            }
-        }
-
+        url.searchParams.forEach((value, key) => {
+            params[key] = value;
+        });
         return params;
+    } catch {
+        return {};
     }
+}
 
-    // Query string parsing
-    parseQueryString(path) {
-        try {
-            const url = new URL(path, this.options.baseUrl);
-            const params = {};
-            url.searchParams.forEach((value, key) => {
-                params[key] = value;
-            });
-            return params;
-        } catch {
-            return {};
+ // Path normalization
+ normalizePath(path) {
+    path = path.trim();
+    if (!path.startsWith('/')) {
+        path = '/' + path;
+    }
+    if (this.options.strict) {
+        if (path.length > 1 && path.endsWith('/')) {
+            path = path.slice(0, -1);
         }
     }
+    return path;
+}
 
-    // Path normalization
-    normalizePath(path) {
-        path = path.trim();
-        if (!path.startsWith('/')) {
-            path = '/' + path;
-        }
-        if (this.options.strict) {
-            if (path.length > 1 && path.endsWith('/')) {
-                path = path.slice(0, -1);
-            }
-        }
-        return path;
-    }
-
-    // Middleware execution
+ // Middleware execution
     async executeMiddlewareChain(middlewares, context) {
         let index = 0;
-
         const next = async () => {
             if (index >= middlewares.length) return;
             const middleware = middlewares[index++];
             await middleware(context, next);
         };
-
         await next();
     }
+  
+    // Get route handler - this was missing
+    getRoute(path) {
+        const normalizedPath = this.normalizePath(path);
+        const route = this.findRoute(normalizedPath);
+        
+        if (!route) {
+            return null;
+        }
 
-    // Utility methods
-    getRoutes() {
-        return Array.from(this.routes.entries()).map(([path, route]) => ({
-            path,
-            methods: Array.from(route.methods)
-        }));
+        return route.handler;
     }
+
 
     getStateEndpoints() {
         return Array.from(this.stateEndpoints.entries()).map(([state, endpoint]) => ({
@@ -226,13 +242,13 @@ class Router extends EventEmitter {
         this.middleware = [];
     }
 
-    // Debugging
-    printRoutes() {
-        console.log('\nRegistered Routes:');
-        for (const [path, route] of this.routes) {
-            console.log(`${Array.from(route.methods).join(',')} ${path}`);
-        }
+   // Debug routes
+   printRoutes() {
+    console.log('\nRegistered Routes:');
+    for (const [path, route] of this.routes) {
+        console.log(`${Array.from(route.methods).join(',')} ${path}`);
     }
+}
 
     // State machine integration helpers
     bindStateMachine(stateMachine) {

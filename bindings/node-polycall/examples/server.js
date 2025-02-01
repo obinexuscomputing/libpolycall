@@ -14,7 +14,7 @@ const store = {
     lendings: new Map()
 };
 
-// Define route handlers separately
+// Define route handlers
 const bookHandlers = {
     GET: async (ctx) => {
         const books = Array.from(store.books.values());
@@ -49,9 +49,9 @@ const corsMiddleware = async (req, res) => {
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
-        return true; // Signal that response is handled
+        return true;
     }
-    return false; // Continue processing
+    return false;
 };
 
 // Request parser
@@ -72,7 +72,7 @@ const parseRequest = async (req) => {
                 };
                 resolve(parsed);
             } catch (error) {
-                reject(error);
+                reject(new Error('Invalid request data: ' + error.message));
             }
         });
         
@@ -89,15 +89,9 @@ const server = http.createServer(async (req, res) => {
 
         // Parse request
         const { method, url, data } = await parseRequest(req);
-        
-        // Find and execute route handler
-        const handler = router.routes.get(url)?.[method];
-        if (!handler) {
-            throw new Error(`No handler found for ${method} ${url}`);
-        }
 
-        const context = { method, url, data };
-        const result = await handler(context);
+        // Handle request through router
+        const result = await router.handleRequest(url, method, data);
 
         // Send response
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -105,7 +99,8 @@ const server = http.createServer(async (req, res) => {
 
     } catch (error) {
         console.error('Request error:', error);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        const statusCode = error.message.includes('No route found') ? 404 : 500;
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ 
             success: false, 
             error: error.message 
@@ -117,6 +112,8 @@ const server = http.createServer(async (req, res) => {
 const port = 8080;
 server.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
+    // Print registered routes for debugging
+    router.printRoutes();
 });
 
 // Handle shutdown
