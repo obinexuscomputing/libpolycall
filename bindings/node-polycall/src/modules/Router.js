@@ -132,6 +132,7 @@ class Router extends EventEmitter {
             console.log(`${methods} ${path}`);
         }
     }
-}
 
+
+}
 module.exports = Router;
