@@ -1,72 +1,122 @@
+# libpolycall
 
-OBINexusComputing@nnamdiHP MINGW64 ~/projects/pkg
-$ cd libpolycall/libpolycall/
+A Program First Data-Oriented Program Interface Implementation
 
-OBINexusComputing@nnamdiHP MINGW64 ~/projects/pkg/libpolycall/libpolycall
-$ make clean
-rm -rf build lib bin
+## Author
+OBINexusComputing - Nnamdi Michael Okpala
 
-OBINexusComputing@nnamdiHP MINGW64 ~/projects/pkg/libpolycall/libpolycall
-$ make
-gcc -Wall -Wextra -I./include -fPIC -D_WIN32 -MMD -MP -c src/network.c -o build/network.o
-gcc -Wall -Wextra -I./include -fPIC -D_WIN32 -MMD -MP -c src/polycall.c -o build/polycall.o
-gcc -Wall -Wextra -I./include -fPIC -D_WIN32 -MMD -MP -c src/polycall_protocol.c -o build/polycall_protocol.o
-gcc -Wall -Wextra -I./include -fPIC -D_WIN32 -MMD -MP -c src/polycall_state_machine.c -o build/polycall_state_machine.o
-ar rcs lib/libpolycall.a build/network.o build/polycall.o build/polycall_protocol.o build/polycall_state_machine.o
-gcc -shared -o lib/libpolycall.dll build/network.o build/polycall.o build/polycall_protocol.o build/polycall_state_machine.o -pthread -lssl -lcrypto -lws2_32
-gcc -Wall -Wextra -I./include -fPIC -D_WIN32 -MMD -MP -c main.c -o build/main.o
-main.c: In function 'main':
-main.c:296:35: warning: variable 'arg3' set but not used [-Wunused-but-set-variable]
-  296 |     char *command, *arg1, *arg2, *arg3;
-      |                                   ^~~~
-main.c:296:28: warning: variable 'arg2' set but not used [-Wunused-but-set-variable]
-  296 |     char *command, *arg1, *arg2, *arg3;
-      |                            ^~~~
-gcc build/main.o lib/libpolycall.a -o bin/polycall.exe -pthread -lssl -lcrypto -lws2_32 -Llib -l:libpolycall.a
+## Overview
 
-OBINexusComputing@nnamdiHP MINGW64 ~/projects/pkg/libpolycall/libpolycall
-$ ./b
-bin/   build/
+libpolycall is a polymorphic call library that implements a program-first approach to interface design. Unlike traditional binding-centric approaches, libpolycall treats programs as first-class citizens, with bindings serving merely as code mappings.
 
-OBINexusComputing@nnamdiHP MINGW64 ~/projects/pkg/libpolycall/libpolycall
-$ ./bin/polycall.exe
-PolyCall CLI v1.0.0 - Type 'help' for commands
 
-> help
+## Why LibPolycall
+### Program First vs Binding First
 
-PolyCall CLI Commands:
-Network Commands:
-  start_network          - Start network services
-  stop_network           - Stop network services
-  list_endpoints         - List all network endpoints
-  list_clients          - List connected clients
+Traditional approaches:
+- Focus on language-specific bindings
+- Require separate implementations for each language
+- Tight coupling between implementation and binding
 
-State Machine Commands:
-  init                  - Initialize the state machine
-  add_state NAME        - Add a new state
-  add_transition NAME FROM TO - Add a transition
-  execute NAME          - Execute a transition
-  lock STATE_ID         - Lock a state
-  unlock STATE_ID       - Unlock a state
-  verify STATE_ID       - Verify state integrity
-  snapshot STATE_ID     - Create state snapshot
-  restore STATE_ID      - Restore from snapshot
-  diagnostics STATE_ID  - Get state diagnostics
+libpolycall's approach:
+- Programs drive the implementation
+- Bindings are thin code mappings
+- Implementation details remain with drivers
+- Language agnostic core
 
-Miscellaneous Commands:
-  list_states          - List all states
-  list_transitions     - List all transitions
-  history              - Show command history
-  status              - Show system status
-  help                - Show this help message
-  quit                - Exit the program
+## Architecture
 
-> start_network
-Unknown command. Type 'help' for available commands
+libpolycall consists of:
+- Core protocol implementation
+- State machine management
+- Network communication layer  
+- Checksum and integrity verification
+- Driver system for hardware/platform specifics
 
-> start_network
-Using port 8080
-Network program initialized successfully on port 8080
-Network services started
+### Drivers vs Bindings
 
->
+**Drivers:**
+- Contain implementation-specific details
+- Handle hardware/platform interactions
+- Maintain their own state
+- Implement core protocols
+
+**Bindings:**
+- Map language constructs to libpolycall APIs
+- No implementation details
+- Pure interface translation
+- Lightweight and stateless
+
+## Building from Source
+
+### Prerequisites
+```bash
+# Required packages
+sudo apt-get install build-essential cmake libssl-dev
+```
+
+### Build Steps
+```bash 
+# Clone repository
+git clone https://gitlab.com/obinexuscomputing/libpolycall.git
+cd libpolycall
+
+# Create build directory
+mkdir build && cd build
+
+# Configure and build
+cmake ..
+make
+
+# Install
+sudo make install
+```
+
+## Web Development Usage
+
+### Node.js Example
+```javascript
+const { PolyCallClient } = require('node-polycall');
+
+const client = new PolyCallClient({
+  host: 'localhost',
+  port: 8080
+});
+
+client.on('connected', () => {
+  console.log('Connected to libpolycall server');
+});
+
+await client.connect();
+```
+
+### Browser Example
+```javascript
+import { PolyCallClient } from '@obinexuscomputing/polycall-web';
+
+const client = new PolyCallClient({
+  websocket: true,
+  endpoint: 'ws://localhost:8080'
+}); 
+
+client.on('state:changed', ({from, to}) => {
+  console.log(`State transition: ${from} -> ${to}`);
+});
+```
+
+## Benefits
+
+- Program-first design enables clean separation of concerns
+- Drivers handle implementation details independently
+- Bindings remain thin and maintainable
+- Platform/language agnostic core protocol
+- Strong state management and integrity checks
+- Network transport flexibility
+
+## License
+
+MIT License. Copyright (c) OBINexusComputing.
+
+## Contributing
+
+Please read CONTRIBUTING.md for details on submitting pull requests.
