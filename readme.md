@@ -1,5 +1,4 @@
 # libpolycall
-
 A Program First Data-Oriented Program Interface Implementation
 
 ## Author
@@ -52,13 +51,13 @@ libpolycall consists of:
 ### Prerequisites
 ```bash
 # Required packages
-sudo apt-get install build-essential cmake libssl-dev
+sudo apt-get install build-essential cmake libssl-dev make
 ```
 
 ### Build Steps
 ```bash 
 # Clone repository
-git clone https://gitlab.com/obinexuscomputing/libpolycall.git
+git clone https://gitlab.com/obinexuscomputing.pkg/libpolycall.git
 cd libpolycall
 
 # Create build directory
